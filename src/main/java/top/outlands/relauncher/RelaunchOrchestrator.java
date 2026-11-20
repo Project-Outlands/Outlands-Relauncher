@@ -1,5 +1,6 @@
 package top.outlands.relauncher;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -14,7 +15,12 @@ import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 
 import top.outlands.relauncher.shared.JvmOptions;
 import top.outlands.relauncher.shared.PackSettings;
@@ -216,8 +222,7 @@ final class RelaunchOrchestrator {
             throw new IOException("Select an existing Outlands " + label + " " + extension + ", or leave it empty to use the release.");
         }
         try (ZipFile zip = new ZipFile(archive.toFile())) {
-            boolean valid = mmc ? zip.stream().anyMatch(entry -> !entry.isDirectory()
-                    && entry.getName().matches("(?:[^/]+/)?mmc-pack\\.json"))
+            boolean valid = mmc ? hasOutlandsMmcPatches(zip)
                     : zip.getEntry("version.json") != null && zip.getEntry("install_profile.json") != null
                     && zip.stream().anyMatch(entry -> entry.getName().startsWith("maven/top/outlands/outlands/")
                             && entry.getName().endsWith(".jar") && !entry.isDirectory());
@@ -225,6 +230,29 @@ final class RelaunchOrchestrator {
         } catch (IOException invalid) {
             throw new IOException("The selected " + (mmc ? "ZIP" : "JAR") + " is not a readable Outlands " + label
                     + ". Choose another file or clear the path.", invalid);
+        }
+    }
+
+    private static boolean hasOutlandsMmcPatches(ZipFile zip) throws IOException {
+        String manifest = zip.stream().filter(entry -> !entry.isDirectory()
+                && entry.getName().matches("(?:[^/]+/)?mmc-pack\\.json"))
+                .map(entry -> entry.getName()).findFirst().orElse(null);
+        if (manifest == null) return false;
+        String root = manifest.substring(0, manifest.length() - "mmc-pack.json".length());
+        if (zip.getEntry(root + "patches/net.minecraft.json") == null
+                || zip.getEntry(root + "patches/org.lwjgl3.json") == null) return false;
+        ZipEntry patch = zip.getEntry(root + "patches/net.minecraftforge.json");
+        if (patch == null || patch.getSize() <= 0 || patch.getSize() > 2 * 1024 * 1024) return false;
+        try (InputStream input = zip.getInputStream(patch)) {
+            byte[] contents = new byte[(int) patch.getSize()];
+            new DataInputStream(input).readFully(contents);
+            if (input.read() != -1) return false;
+            JsonElement json = new JsonParser().parse(new String(contents, StandardCharsets.UTF_8));
+            JsonElement main = json.isJsonObject() ? json.getAsJsonObject().get("mainClass") : null;
+            return main != null && main.isJsonPrimitive()
+                    && "top.outlands.foundation.boot.Foundation".equals(main.getAsString());
+        } catch (JsonParseException invalid) {
+            throw new IOException("Invalid Outlands component metadata", invalid);
         }
     }
 

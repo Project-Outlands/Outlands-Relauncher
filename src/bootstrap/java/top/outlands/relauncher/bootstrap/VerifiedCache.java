@@ -171,12 +171,21 @@ final class VerifiedCache {
                 candidates.add(original);
                 return new ArrayList<>(candidates);
             }
+            if ("maven.outlands.top".equalsIgnoreCase(host) && ("/releases/" + path).equals(originalPath)
+                    && path.matches("top/outlands/outlands/[A-Za-z0-9._-]+/outlands-[A-Za-z0-9._-]+-mmc\\.zip")) {
+                return releaseSources(path);
+            }
             if ("nexus.jsdu.cn".equalsIgnoreCase(host) && path.startsWith("top/outlands/")
                     && ("/repository/" + path).equals(originalPath)) {
                 return Arrays.asList(URI.create("https://maven.outlands.top/releases/" + path), original);
             }
         }
         return Collections.singletonList(original);
+    }
+
+    static List<URI> releaseSources(String path) {
+        return Arrays.asList(URI.create("https://maven.outlands.top/releases/" + path),
+                URI.create("https://nexus.jsdu.cn/repository/" + path));
     }
 
     private static boolean verified(Path file, InstallerMetadata.Artifact artifact) throws IOException {

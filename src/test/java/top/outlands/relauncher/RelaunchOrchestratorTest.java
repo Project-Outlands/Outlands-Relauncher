@@ -218,8 +218,15 @@ class RelaunchOrchestratorTest {
     void localMmcAndDownloadSettingsReachPreparationWithoutChangingTheInstance() throws Exception {
         Path mmc = instance.resolve("installers/local.zip");
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(mmc))) {
-            zip.putNextEntry(new ZipEntry("pack/mmc-pack.json"));
-            zip.closeEntry();
+            for (String file : Arrays.asList("mmc-pack.json", "patches/net.minecraft.json", "patches/org.lwjgl3.json",
+                    "patches/net.minecraftforge.json")) {
+                zip.putNextEntry(new ZipEntry("pack/" + file));
+                if (file.endsWith("net.minecraftforge.json")) {
+                    zip.write("{\"mainClass\":\"top.outlands.foundation.boot.Foundation\"}"
+                            .getBytes(StandardCharsets.UTF_8));
+                }
+                zip.closeEntry();
+            }
         }
         Path libraries = Files.createDirectory(instance.resolve("library share"));
         Files.createDirectories(config.getParent());
@@ -247,6 +254,28 @@ class RelaunchOrchestratorTest {
         try (Stream<Path> entries = Files.list(libraries)) {
             assertEquals(0, entries.count());
         }
+    }
+
+    @Test
+    void ordinaryPrismPackPromptsToRepairAutomaticSettings() throws IOException {
+        Path other = instance.resolve("installers/not-outlands.zip");
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(other))) {
+            zip.putNextEntry(new ZipEntry("mmc-pack.json"));
+            zip.closeEntry();
+        }
+        Files.createDirectories(config.getParent());
+        Files.write(config, ("mode=auto\njavaExecutable=java home/bin/java.exe\nlocalMmcPack=installers/not-outlands.zip\n")
+                .getBytes(StandardCharsets.UTF_8));
+        ui.selection = (initial, error, validator) -> {
+            assertEquals("installers/not-outlands.zip", initial.localMmcPack);
+            assertTrue(error.contains("not a readable Outlands MMC pack"));
+            return null;
+        };
+        RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
+                () -> fail("Should not stop logging"));
+        assertNull(launcher.launch(instance, dir -> fail("Should not capture session")));
+        assertEquals(1, ui.configurations);
+        assertFalse(Files.exists(instance.resolve(".outlands-relauncher")));
     }
 
     @Test

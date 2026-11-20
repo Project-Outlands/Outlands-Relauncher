@@ -131,24 +131,38 @@ public final class PrepareMain {
     }
 
     private static URI releaseUri(String path) {
-        return URI.create("https://maven.outlands.top/releases/" + path);
+        return VerifiedCache.releaseSources(path).get(0);
     }
 
     // Remember a previously verified release descriptor so a selected version can launch offline too.
-    private static InstallerMetadata.Artifact customRelease(Path cache, VerifiedCache.Downloader downloader, String version)
+    static InstallerMetadata.Artifact customRelease(Path cache, VerifiedCache.Downloader downloader, String version)
             throws IOException {
         Path root = Files.createDirectories(cache).toRealPath();
         Path descriptor = VerifiedCache.resolveForWrite(root, "releases/" + version + ".sha256");
         String path = releasePath(version);
-        String hash;
         if (Files.isRegularFile(descriptor, LinkOption.NOFOLLOW_LINKS) && Files.size(descriptor) <= 128) {
-            hash = checksum(Files.readAllBytes(descriptor));
-        } else {
-            try (InputStream stream = downloader.open(releaseUri(path + ".sha256"))) {
+            try {
+                return customReleaseArtifact(path, checksum(Files.readAllBytes(descriptor)));
+            } catch (IOException damaged) {
+                System.err.println("Cached Outlands release checksum is unreadable; requesting it again.");
+            }
+        }
+        IOException failure = new IOException("Could not obtain the SHA-256 for Outlands MMC " + version);
+        for (URI source : VerifiedCache.releaseSources(path + ".sha256")) {
+            final String hash;
+            try (InputStream stream = downloader.open(source)) {
                 hash = checksum(VerifiedCache.readBytes(stream, 128));
+            } catch (IOException unavailable) {
+                failure.addSuppressed(new IOException(source.getHost() + ": " + unavailable.getMessage(), unavailable));
+                continue;
             }
             writeAtomically(descriptor, output -> output.write(hash.getBytes(StandardCharsets.US_ASCII)));
+            return customReleaseArtifact(path, hash);
         }
+        throw failure;
+    }
+
+    private static InstallerMetadata.Artifact customReleaseArtifact(String path, String hash) {
         return new InstallerMetadata.Artifact(path, -1, "SHA-256", hash, releaseUri(path), Collections.emptyList());
     }
 

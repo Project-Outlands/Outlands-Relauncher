@@ -44,6 +44,28 @@ class DownloadOptionsTest {
     Path root;
 
     @Test
+    void outlandsReleaseAndChecksumFallBackToTheSameVersionOnTheReleaseMirror() throws IOException {
+        String relative = "top/outlands/outlands/2026.11.14/outlands-2026.11.14-mmc.zip";
+        String hash = VerifiedCache.hex(VerifiedCache.digest("SHA-256").digest(GOOD));
+        List<URI> seen = new ArrayList<>();
+        VerifiedCache.Downloader downloader = uri -> {
+            seen.add(uri);
+            if (uri.getHost().equals("maven.outlands.top")) throw new IOException("offline origin");
+            return new ByteArrayInputStream(uri.getPath().endsWith(".sha256")
+                    ? hash.getBytes(StandardCharsets.US_ASCII) : GOOD);
+        };
+        InstallerMetadata.Artifact artifact = PrepareMain.customRelease(root, downloader, "2026.11.14");
+        assertArrayEquals(GOOD, Files.readAllBytes(new VerifiedCache(root, downloader).obtain(artifact, null)));
+        assertEquals(Arrays.asList(URI.create("https://maven.outlands.top/releases/" + relative + ".sha256"),
+                URI.create("https://nexus.jsdu.cn/repository/" + relative + ".sha256"),
+                URI.create("https://maven.outlands.top/releases/" + relative),
+                URI.create("https://nexus.jsdu.cn/repository/" + relative)), seen);
+        assertEquals(hash, PrepareMain.customRelease(root, uri -> {
+            throw new AssertionError("Cached descriptor should not use the network");
+        }, "2026.11.14").digest);
+    }
+
+    @Test
     void resolvesDirectoryWithoutCreatingItAndNormalizesMirrorRoot() throws IOException {
         Properties properties = new Properties();
         assertNull(DownloadOptions.read(properties, root).mavenMirror);
