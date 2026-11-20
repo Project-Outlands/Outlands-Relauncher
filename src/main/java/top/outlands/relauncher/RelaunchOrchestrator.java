@@ -6,19 +6,29 @@ import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import top.outlands.relauncher.shared.JvmOptions;
 
 final class RelaunchOrchestrator {
     private static final String RESOURCES = "/META-INF/outlands-relauncher/";
     private static final String PREPARE = "top.outlands.relauncher.bootstrap.PrepareMain";
 
     interface Interaction {
-        boolean confirm() throws InterruptedException;
-        Path pickJava() throws InterruptedException;
+        default boolean canConfigure() { return true; }
+        LaunchSettings configure(LaunchSettings initial, String initialError, SettingsValidator validator)
+                throws InterruptedException;
         void fallback(String reason);
+    }
+
+    interface SettingsValidator {
+        void validate(LaunchSettings settings) throws IOException, InterruptedException;
     }
 
     interface SessionCapture {
@@ -45,18 +55,24 @@ final class RelaunchOrchestrator {
         boolean accepts(Path java, Path gameDir) throws InterruptedException;
     }
 
+    interface OptionProbe {
+        boolean accepts(Path java, Path gameDir, List<String> options) throws IOException, InterruptedException;
+    }
+
     private final Interaction ui;
     private final Resources resources;
     private final ProcessStarter processes;
     private final Probe probe;
+    private final OptionProbe optionProbe;
     private final Runnable releaseLogs;
 
     RelaunchOrchestrator(Interaction ui, Resources resources, ProcessStarter processes, Probe probe,
-                         Runnable releaseLogs) {
+                         OptionProbe optionProbe, Runnable releaseLogs) {
         this.ui = ui;
         this.resources = resources;
         this.processes = processes;
         this.probe = probe;
+        this.optionProbe = optionProbe;
         this.releaseLogs = releaseLogs;
     }
 
@@ -70,23 +86,18 @@ final class RelaunchOrchestrator {
             if (config.mode == RelaunchConfig.Mode.FORGE) {
                 return null;
             }
-            failure = "Could not ask for permission to launch Outlands.";
-            if (config.mode == RelaunchConfig.Mode.ASK && !ui.confirm()) {
-                return null;
+            failure = "Could not configure Outlands launch settings.";
+            if (config.mode == RelaunchConfig.Mode.ASK && !ui.canConfigure()) return null;
+            LaunchSettings initial = config.settings();
+            if (initial.javaExecutable.trim().isEmpty()) {
+                Path detected = detectJava(gameDir);
+                if (detected != null) initial = initial.withJava(detected.toString());
             }
+            List<String> inherited = ManagementFactory.getRuntimeMXBean().getInputArguments();
+            ValidatedSettings settings = selectSettings(gameDir, config.mode, initial, inherited);
+            if (settings == null) return null;
             failure = "Forge did not provide a usable client session or assets.";
             Session session = capture.capture(gameDir);
-            failure = "Could not find Java 25 x64. Set javaExecutable in config/outlands-relauncher.properties.";
-            Path java = findJava(config, gameDir);
-            Path picked = null;
-            if (java == null) {
-                picked = ui.pickJava();
-                if (picked == null || !probe.accepts(picked, gameDir)) {
-                    ui.fallback(failure);
-                    return null;
-                }
-                java = picked;
-            }
 
             failure = "Could not create the Outlands run directory or extract the embedded bootstrap JARs.";
             Path root = RelaunchPaths.directory(gameDir, ".outlands-relauncher");
@@ -95,9 +106,10 @@ final class RelaunchOrchestrator {
             try (Run run = new Run(Files.createTempDirectory(runs, "run-"))) {
                 Path bootstrap = extract(run.dir, "bootstrap.jar");
                 Path gson = extract(run.dir, "gson.jar");
+                Files.write(run.dir.resolve(JvmOptions.FILE_NAME), settings.options, StandardCharsets.UTF_8);
                 failure = "Could not prepare Outlands. Check the preparation output and localInstaller setting.";
-                Process prepare = run.start(prepareCommand(java, gameDir, cache, run.dir, bootstrap, gson,
-                        config.localInstaller(), ManagementFactory.getRuntimeMXBean().getInputArguments()));
+                Process prepare = run.start(prepareCommand(settings.java, gameDir, cache, run.dir, bootstrap, gson,
+                        settings.installer));
                 final int status;
                 // Both child JVMs treat this pipe closing as loss of their Forge owner.
                 try (OutputStream parentPipe = prepare.getOutputStream()) {
@@ -117,8 +129,8 @@ final class RelaunchOrchestrator {
                 if (Thread.currentThread().isInterrupted()) {
                     throw new InterruptedException();
                 }
-                child = run.start(gameCommand(java, gameDir, args));
-                return finishGame(child, handoff, config, picked);
+                child = run.start(gameCommand(settings.java, gameDir, args));
+                return finishGame(child, handoff, config, settings);
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -134,18 +146,84 @@ final class RelaunchOrchestrator {
         return null;
     }
 
-    private Path findJava(RelaunchConfig config, Path gameDir) throws InterruptedException {
-        Path configured = config.javaExecutable();
-        if (configured != null) {
-            return probe.accepts(configured, gameDir) ? configured : null;
-        }
-        for (Path candidate : JavaRuntime.candidates(System.getProperty("java.home"), System.getenv("JAVA_HOME"),
-                System.getenv("PATH"))) {
-            if (probe.accepts(candidate, gameDir)) {
-                return candidate;
+    private ValidatedSettings selectSettings(Path gameDir, RelaunchConfig.Mode mode, LaunchSettings initial,
+                                             List<String> inherited) throws IOException, InterruptedException {
+        String error = null;
+        if (mode == RelaunchConfig.Mode.AUTO) {
+            try {
+                // An already valid automatic configuration does not need to be rewritten.
+                return validate(gameDir, initial, inherited, false);
+            } catch (IOException invalid) {
+                error = invalid.getMessage();
+                if (!ui.canConfigure()) {
+                    ui.fallback(error);
+                    return null;
+                }
             }
         }
+        AtomicReference<ValidatedSettings> approved = new AtomicReference<>();
+        LaunchSettings selected = ui.configure(initial, error, candidate ->
+                approved.set(validate(gameDir, candidate, inherited, true)));
+        if (selected == null) return null;
+        ValidatedSettings checked = approved.get();
+        if (checked == null || checked.selected != selected) {
+            throw new IllegalStateException("Launch settings must be approved before starting");
+        }
+        return checked;
+    }
+
+    private ValidatedSettings validate(Path gameDir, LaunchSettings settings, List<String> inherited, boolean save)
+            throws IOException, InterruptedException {
+        Path java = settingPath(gameDir, settings.javaExecutable, "Java executable");
+        if (java == null || !probe.accepts(java, gameDir)) {
+            throw new IOException("Select a working Java 25 x64 bin/java.exe.");
+        }
+        Path installer = settingPath(gameDir, settings.localInstaller, "Outlands installer");
+        if (installer != null && (!Files.isRegularFile(installer)
+                || !installer.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar"))) {
+            throw new IOException("Select an existing Outlands installer .jar, or leave it empty to use the release.");
+        }
+        List<String> options = JvmOptions.resolve(settings.xms, settings.xmx, settings.jvmArgs, inherited);
+        try {
+            if (optionProbe.accepts(java, gameDir, options)) {
+                return new ValidatedSettings(java, installer, options, settings, save);
+            }
+        } catch (IOException error) {
+            throw new IOException("Could not verify the JVM parameters. Check that their characters are supported.", error);
+        }
+        throw new IOException("Java 25 did not accept the JVM parameters. Check the memory values and advanced options.");
+    }
+
+    private static Path settingPath(Path gameDir, String value, String label) throws IOException {
+        try {
+            return RelaunchConfig.resolvePath(gameDir, value);
+        } catch (InvalidPathException invalid) {
+            throw new IOException(label + " path is not valid.", invalid);
+        }
+    }
+
+    private Path detectJava(Path gameDir) throws InterruptedException {
+        for (Path candidate : JavaRuntime.candidates(System.getProperty("java.home"), System.getenv("JAVA_HOME"),
+                System.getenv("PATH"))) {
+            if (probe.accepts(candidate, gameDir)) return candidate;
+        }
         return null;
+    }
+
+    private static final class ValidatedSettings {
+        final Path java;
+        final Path installer;
+        final List<String> options;
+        final LaunchSettings selected;
+        final boolean save;
+
+        ValidatedSettings(Path java, Path installer, List<String> options, LaunchSettings selected, boolean save) {
+            this.java = java;
+            this.installer = installer;
+            this.options = options;
+            this.selected = selected;
+            this.save = save;
+        }
     }
 
     private Path extract(Path runDir, String name) throws IOException {
@@ -160,10 +238,10 @@ final class RelaunchOrchestrator {
     }
 
     static ProcessBuilder prepareCommand(Path java, Path gameDir, Path cache, Path run, Path bootstrap, Path gson,
-                                         Path localInstaller, List<String> vmArgs) {
+                                         Path localInstaller) {
         return JavaRuntime.command(gameDir, Arrays.asList(java.toString(), "-cp", bootstrap + ";" + gson, PREPARE,
                 cache.toString(), run.toString(), localInstaller == null ? "" : localInstaller.toString(),
-                bootstrap.toString(), JavaRuntime.heapOption(vmArgs, "-Xms"), JavaRuntime.heapOption(vmArgs, "-Xmx")))
+                bootstrap.toString()))
                 .redirectOutput(ProcessBuilder.Redirect.INHERIT).redirectError(ProcessBuilder.Redirect.INHERIT);
     }
 
@@ -172,11 +250,11 @@ final class RelaunchOrchestrator {
                 .redirectOutput(ProcessBuilder.Redirect.INHERIT).redirectError(ProcessBuilder.Redirect.INHERIT);
     }
 
-    private int finishGame(Process child, Handoff handoff, RelaunchConfig config, Path picked) {
+    private int finishGame(Process child, Handoff handoff, RelaunchConfig config, ValidatedSettings settings) {
         try {
-            config.saveAuto(picked);
+            if (settings.save) config.save(settings.selected);
         } catch (IOException | RuntimeException saveFailure) {
-            diagnostic("The Outlands process started, but automatic relaunch settings could not be saved.");
+            diagnostic("The Outlands process started, but relaunch settings could not be saved.");
         }
         String failure = "Could not release Forge logging before starting Outlands.";
         try (OutputStream stdin = child.getOutputStream()) {

@@ -27,6 +27,9 @@ import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import top.outlands.relauncher.shared.JavaArgFile;
+import top.outlands.relauncher.shared.JvmOptions;
+
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -236,7 +239,7 @@ class PrepareMainTest {
         } finally {
             if (version.isAlive()) version.destroyForcibly();
         }
-        Charset launcher = PrepareMain.launcherCharset();
+        Charset launcher = JavaArgFile.launcherCharset();
         String chinese = "\u4e2d\u6587";
         assumeTrue(launcher.newEncoder().canEncode(chinese), "Host platform code page cannot represent Chinese");
         String pathName = chinese + " spaces # " + multibyteBackslash(launcher);
@@ -249,7 +252,7 @@ class PrepareMainTest {
         String expected = pathName + "\\\"\n\r\t\f\\";
         Path argfile = root.resolve("probe.args");
         try (java.io.OutputStream output = Files.newOutputStream(argfile)) {
-            PrepareMain.writeArgFile(output, Arrays.asList("-Dprobe=" + expected, source.toString(), expected, ""), launcher);
+            JavaArgFile.write(output, Arrays.asList("-Dprobe=" + expected, source.toString(), expected, ""), launcher);
         }
         Path log = root.resolve("probe.log");
         Process process = new ProcessBuilder(javaExe.toString(), "@" + argfile).redirectErrorStream(true)
@@ -423,8 +426,10 @@ class PrepareMainTest {
 
         void prepare(boolean pinned) throws IOException {
             run = Files.createTempDirectory(root, "run space-").toRealPath();
+            Files.write(run.resolve(JvmOptions.FILE_NAME), Arrays.asList("-Xms512m", "-Xmx4G", "-Dcustom=two words"),
+                    StandardCharsets.UTF_8);
             PrepareMain.prepare(new String[] {cache.toString(), run.toString(), pinned ? "" : installer.toString(),
-                    bootstrap.toString(), "-Xms512m", "-Xmx4G"}, uri -> {
+                    bootstrap.toString()}, uri -> {
                         if (offline) throw new AssertionError("Unexpected download while offline: " + uri);
                         requests++;
                         byte[] bytes = artifacts.get(uri);
@@ -442,20 +447,21 @@ class PrepareMainTest {
             assertEquals(Integer.toString(tokens.size()), properties.getProperty("game.count"));
             assertEquals(tokens.size() + 2, properties.size());
             for (int i = 0; i < tokens.size(); i++) assertEquals(tokens.get(i), properties.getProperty("game." + i));
-            List<String> args = Files.readAllLines(run.resolve("java.args"), PrepareMain.launcherCharset());
+            List<String> args = Files.readAllLines(run.resolve("java.args"), JavaArgFile.launcherCharset());
             assertEquals("\"-Xms512m\"", args.get(0));
             assertEquals("\"-Xmx4G\"", args.get(1));
-            assertEquals("\"-Doutlands.relauncher.child=true\"", args.get(2));
-            assertTrue(args.get(3).startsWith("\"-Djava.library.path="));
-            assertTrue(args.get(3).endsWith("natives\""));
-            assertEquals("\"-cp\"", args.get(4));
-            String[] paths = args.get(5).substring(1, args.get(5).length() - 1).replace("\\\\", "\\").split(";");
+            assertEquals("\"-Dcustom=two words\"", args.get(2));
+            assertEquals("\"-Doutlands.relauncher.child=true\"", args.get(3));
+            assertTrue(args.get(4).startsWith("\"-Djava.library.path="));
+            assertTrue(args.get(4).endsWith("natives\""));
+            assertEquals("\"-cp\"", args.get(5));
+            String[] paths = args.get(6).substring(1, args.get(6).length() - 1).replace("\\\\", "\\").split(";");
             assertEquals(4, paths.length);
             assertTrue(paths[0].endsWith(LOADER_PATH.replace('/', java.io.File.separatorChar)));
             assertTrue(paths[1].endsWith("lwjgl.jar"));
             assertTrue(paths[2].endsWith("client-1.12.2.jar"));
             assertEquals(bootstrap.toString(), paths[3]);
-            assertEquals("\"top.outlands.relauncher.bootstrap.ChildMain\"", args.get(6));
+            assertEquals("\"top.outlands.relauncher.bootstrap.ChildMain\"", args.get(7));
         }
 
         void assertNoLaunchFiles() {

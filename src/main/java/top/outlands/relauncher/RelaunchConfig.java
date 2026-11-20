@@ -37,32 +37,40 @@ final class RelaunchConfig {
         mode = Mode.valueOf(properties.getProperty("mode", "ask").trim().toUpperCase(Locale.ROOT));
     }
 
+    LaunchSettings settings() {
+        return new LaunchSettings(value("javaExecutable"), value("localInstaller"), value("xms"), value("xmx"),
+                value("jvmArgs"), mode == Mode.AUTO || !properties.containsKey("mode"));
+    }
+
     Path javaExecutable() {
-        return optionalPath("javaExecutable");
+        return resolvePath(gameDir, value("javaExecutable"));
     }
 
     Path localInstaller() {
-        return optionalPath("localInstaller");
+        return resolvePath(gameDir, value("localInstaller"));
     }
 
-    private Path optionalPath(String key) {
-        String value = properties.getProperty(key, "").trim();
+    private String value(String key) {
+        return properties.getProperty(key, "");
+    }
+
+    static Path resolvePath(Path gameDir, String input) {
+        String value = input.trim();
         return value.isEmpty() ? null : gameDir.resolve(Paths.get(value)).normalize().toAbsolutePath();
     }
 
-    void saveAuto(Path pickedJava) throws IOException {
-        if (mode == Mode.AUTO && pickedJava == null) {
-            return;
-        }
+    void save(LaunchSettings settings) throws IOException {
         Path dir = RelaunchPaths.directory(gameDir, "config");
         if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)
                 && !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Configuration is not a regular file");
         }
-        properties.setProperty("mode", "auto");
-        if (pickedJava != null) {
-            properties.setProperty("javaExecutable", pickedJava.toString());
-        }
+        properties.setProperty("mode", settings.automatic ? "auto" : "ask");
+        setOptional("javaExecutable", settings.javaExecutable);
+        setOptional("localInstaller", settings.localInstaller);
+        setOptional("xms", settings.xms);
+        setOptional("xmx", settings.xmx);
+        setOptional("jvmArgs", settings.jvmArgs);
         Path temporary = Files.createTempFile(dir, "outlands-relauncher-", ".tmp");
         try {
             try (Writer writer = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8)) {
@@ -76,5 +84,9 @@ final class RelaunchConfig {
         } finally {
             Files.deleteIfExists(temporary);
         }
+    }
+    private void setOptional(String key, String value) {
+        if (value.trim().isEmpty()) properties.remove(key);
+        else properties.setProperty(key, value);
     }
 }

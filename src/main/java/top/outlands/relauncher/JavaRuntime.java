@@ -4,12 +4,14 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -20,9 +22,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
-final class JavaRuntime {
-    private static final Pattern HEAP = Pattern.compile("[0-9]{1,19}[kKmMgGtT]?");
+import top.outlands.relauncher.shared.JavaArgFile;
 
+final class JavaRuntime {
     private JavaRuntime() {}
 
     static boolean isX64(String arch) {
@@ -81,11 +83,30 @@ final class JavaRuntime {
         argv.add(java.toString());
         argv.add("-XshowSettings:properties");
         argv.add("-version");
+        String output = probeOutput(gameDir, argv);
+        return output != null && matchesProbe(output);
+    }
+
+    static boolean probeOptions(Path java, Path gameDir, List<String> options) throws IOException, InterruptedException {
+        Path argFile = Files.createTempFile("outlands-java-check-", ".args");
+        try {
+            List<String> argv = new ArrayList<>(options);
+            argv.add("-version");
+            try (OutputStream output = Files.newOutputStream(argFile)) {
+                JavaArgFile.write(output, argv, JavaArgFile.launcherCharset());
+            }
+            return probeOutput(gameDir, Arrays.asList(java.toString(), "@" + argFile)) != null;
+        } finally {
+            Files.deleteIfExists(argFile);
+        }
+    }
+
+    private static String probeOutput(Path gameDir, List<String> argv) throws InterruptedException {
         Process process;
         try {
             process = command(gameDir, argv).redirectErrorStream(true).start();
         } catch (IOException failedToStart) {
-            return false;
+            return null;
         }
         try {
             process.getOutputStream().close();
@@ -98,12 +119,12 @@ final class JavaRuntime {
             Thread reader = new Thread(read, "Outlands Java probe output");
             reader.setDaemon(true);
             reader.start();
-            if (!process.waitFor(5, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                return false;
+            if (!process.waitFor(10, TimeUnit.SECONDS) || process.exitValue() != 0) {
+                return null;
             }
-            return matchesProbe(read.get(1, TimeUnit.SECONDS));
+            return read.get(1, TimeUnit.SECONDS);
         } catch (IOException | ExecutionException | TimeoutException failedProbe) {
-            return false;
+            return null;
         } finally {
             if (process.isAlive()) {
                 process.destroyForcibly();
@@ -138,16 +159,5 @@ final class JavaRuntime {
             }
         }
         return "25".equals(version) && isX64(arch);
-    }
-
-    static String heapOption(List<String> input, String option) {
-        String result = "";
-        for (String arg : input) {
-            if (arg.startsWith(option)) {
-                String value = arg.substring(option.length());
-                result = HEAP.matcher(value).matches() ? arg : "";
-            }
-        }
-        return result;
     }
 }

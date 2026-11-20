@@ -38,15 +38,6 @@ class JavaRuntimeTest {
     }
 
     @Test
-    void keepsOnlyExplicitSafeHeapValues() {
-        assertEquals("-Xmx3G", JavaRuntime.heapOption(Arrays.asList("-Xmx1g", "-Dvalue=ignored", "-Xmx3G"), "-Xmx"));
-        assertEquals("-Xms512m", JavaRuntime.heapOption(Collections.singletonList("-Xms512m"), "-Xms"));
-        assertEquals("", JavaRuntime.heapOption(Arrays.asList("-Xmx1g", "-Xmx3g -javaagent:agent.jar"), "-Xmx"));
-        assertEquals("", JavaRuntime.heapOption(Arrays.asList("-XX:MaxRAMPercentage=75", "-Xmx+1024"), "-Xmx"));
-        assertEquals("", JavaRuntime.heapOption(Collections.emptyList(), "-Xms"));
-    }
-
-    @Test
     void childEnvironmentCannotInjectJavaOptionsOrClasspath() {
         ProcessBuilder process = JavaRuntime.command(instance, Collections.singletonList(Paths.get("java").toString()));
         for (String key : process.environment().keySet()) {

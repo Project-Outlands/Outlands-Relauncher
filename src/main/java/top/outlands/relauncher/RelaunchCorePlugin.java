@@ -41,7 +41,7 @@ public final class RelaunchCorePlugin implements IFMLLoadingPlugin {
         File gameDir = (File) location;
         RelaunchOrchestrator orchestrator = new RelaunchOrchestrator(new RelaunchUi(),
                 RelaunchCorePlugin.class::getResourceAsStream, ProcessBuilder::start, JavaRuntime::probe,
-                RelaunchCorePlugin::releaseForgeLogs);
+                JavaRuntime::probeOptions, RelaunchCorePlugin::releaseForgeLogs);
         Integer exit = orchestrator.launch(gameDir.toPath(), instanceDir -> {
             GameArguments session = GameArguments.capture(snapshot, instanceDir);
             return launchProperties -> {

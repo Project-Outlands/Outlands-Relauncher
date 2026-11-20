@@ -3,10 +3,6 @@ package top.outlands.relauncher.bootstrap;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URI;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -18,6 +14,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
 import java.util.zip.ZipFile;
+
+import top.outlands.relauncher.shared.JavaArgFile;
+import top.outlands.relauncher.shared.JvmOptions;
 
 import static top.outlands.relauncher.bootstrap.InstallerMetadata.require;
 
@@ -33,8 +32,8 @@ public final class PrepareMain {
 
     public static void main(String[] args) {
         try {
-            require(args.length == 6,
-                    "Expected cacheDir, runDir, localInstaller (or empty), bootstrapJar, Xms (or empty), Xmx (or empty)");
+            require(args.length == 4,
+                    "Expected cacheDir, runDir, localInstaller (or empty), bootstrapJar");
             String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
             require(System.getProperty("os.name", "").startsWith("Windows")
                     && ("amd64".equals(arch) || "x86_64".equals(arch))
@@ -58,8 +57,7 @@ public final class PrepareMain {
                 && !Files.exists(propertiesFile, LinkOption.NOFOLLOW_LINKS)
                 && !Files.exists(runDir.resolve("natives"), LinkOption.NOFOLLOW_LINKS), "Run directory was already used");
         Path bootstrapJar = absoluteFile(args[3], "Bootstrap JAR");
-        checkHeap(args[4], "-Xms");
-        checkHeap(args[5], "-Xmx");
+        List<String> jvm = readJvmOptions(runDir);
         VerifiedCache cache = new VerifiedCache(Paths.get(args[0]), downloader);
         Path installer = args[2].isEmpty() ? cache.obtain(release, null) : absoluteFile(args[2], "Local installer");
         List<String> classpath = new ArrayList<>();
@@ -79,15 +77,12 @@ public final class PrepareMain {
             }
         }
         classpath.add(classpathEntry(bootstrapJar));
-        List<String> jvm = new ArrayList<>();
-        if (!args[4].isEmpty()) jvm.add(args[4]);
-        if (!args[5].isEmpty()) jvm.add(args[5]);
         jvm.add("-Doutlands.relauncher.child=true");
         jvm.add("-Djava.library.path=" + natives);
         jvm.add("-cp");
         jvm.add(String.join(";", classpath));
         jvm.add(CHILD_MAIN);
-        writeAtomically(argFile, output -> writeArgFile(output, jvm, launcherCharset()));
+        writeAtomically(argFile, output -> JavaArgFile.write(output, jvm, JavaArgFile.launcherCharset()));
 
         Properties properties = new Properties();
         properties.setProperty("version", metadata.id);
@@ -105,46 +100,20 @@ public final class PrepareMain {
         return path.toRealPath();
     }
 
-    private static void checkHeap(String argument, String option) throws IOException {
-        require(argument.isEmpty() || argument.matches(option + "[0-9]+[kKmMgGtT]?"), "Invalid " + option + " argument");
+    private static List<String> readJvmOptions(Path runDir) throws IOException {
+        Path path = runDir.resolve(JvmOptions.FILE_NAME);
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return new ArrayList<>();
+        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) <= JvmOptions.MAX_BYTES,
+                "Invalid JVM options file");
+        List<String> options = Files.readAllLines(path, StandardCharsets.UTF_8);
+        JvmOptions.validate(options);
+        return options;
     }
 
     private static String classpathEntry(Path path) throws IOException {
         String value = path.toString();
         require(value.indexOf(';') < 0, "Windows classpath cannot use paths containing semicolons");
         return value;
-    }
-
-    static Charset launcherCharset() {
-        // The Windows launcher consumes platform-code-page bytes, not Java 25's UTF-8 default charset.
-        return Charset.forName(System.getProperty("sun.jnu.encoding", StandardCharsets.UTF_8.name()));
-    }
-
-    static void writeArgFile(OutputStream output, List<String> arguments, Charset charset) throws IOException {
-        for (String argument : arguments) {
-            ByteBuffer encoded;
-            try {
-                encoded = charset.newEncoder().encode(CharBuffer.wrap(argument));
-            } catch (CharacterCodingException ex) {
-                throw new IOException("Launch argument cannot be represented in the platform encoding " + charset, ex);
-            }
-            output.write('"');
-            // The launcher's tokenizer also treats a backslash byte inside a multibyte character as an escape.
-            while (encoded.hasRemaining()) {
-                int ch = encoded.get() & 0xff;
-                switch (ch) {
-                    case '\\': case '"': output.write('\\'); output.write(ch); break;
-                    case '\n': output.write('\\'); output.write('n'); break;
-                    case '\r': output.write('\\'); output.write('r'); break;
-                    case '\t': output.write('\\'); output.write('t'); break;
-                    case '\f': output.write('\\'); output.write('f'); break;
-                    case 0: throw new IOException("NUL in launch argument");
-                    default: output.write(ch);
-                }
-            }
-            output.write('"');
-            output.write('\n');
-        }
     }
 
     private interface OutputWriter {
