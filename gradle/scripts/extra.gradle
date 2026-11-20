@@ -19,3 +19,97 @@ spotless {
         removeUnusedImports()
     }
 }
+
+// This isolated helper runs under the selected Java 25; it cannot see Forge's runtime libraries.
+sourceSets {
+    main.java.srcDir('src/shared/java')
+    bootstrap.java.srcDir('src/shared/java')
+}
+
+configurations {
+    bootstrapJson {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+    bootstrapImplementation.extendsFrom bootstrapJson
+    bootstrapCompileClasspath.attributes.attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 25)
+    testImplementation.extendsFrom bootstrapJson
+}
+
+repositories {
+    maven {
+        name = 'OutlandsReleases'
+        url = 'https://maven.outlands.top/releases'
+        content { includeModule('top.outlands', 'foundation') }
+    }
+}
+
+dependencies {
+    bootstrapJson 'com.google.code.gson:gson:2.14.0'
+    bootstrapCompileOnly('top.outlands:foundation:1.1.1') { transitive = false }
+    testImplementation sourceSets.bootstrap.output
+}
+
+tasks.named('compileBootstrapJava', JavaCompile) {
+    javaCompiler.set(javaToolchains.compilerFor {
+        languageVersion.set(JavaLanguageVersion.of(25))
+    })
+    options.release.set(8)
+}
+
+def bootstrapJar = tasks.register('bootstrapJar', Jar) {
+    archiveFileName.set('bootstrap.jar')
+    destinationDirectory.set(layout.buildDirectory.dir('bootstrap'))
+    from(sourceSets.bootstrap.output)
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+tasks.named('processResources', ProcessResources) {
+    into('META-INF/outlands-relauncher') {
+        from(bootstrapJar)
+        from(configurations.bootstrapJson) { rename { 'gson.jar' } }
+    }
+}
+
+// Check the distributable (not the dev jar), including the isolated bootstrap's bytecode.
+def distributable = tasks.named('reobfJar').flatMap { it.archiveFile }
+def corePlugin = property('is_coremod').toBoolean() ? property('coremod_plugin_class_name') : null
+def verifyRelaunchJar = tasks.register('verifyRelaunchJar') {
+    inputs.file(distributable)
+    doLast {
+        def checkClassVersion = { InputStream input ->
+            def data = new DataInputStream(input)
+            if (data.readInt() != 0xCAFEBABE.intValue()) throw new GradleException('Invalid class file')
+            data.readUnsignedShort()
+            if (data.readUnsignedShort() != 52) throw new GradleException('Expected Java 8 class files')
+        }
+        new java.util.jar.JarFile(distributable.get().asFile).withCloseable { jar ->
+            def attrs = jar.manifest.mainAttributes
+            assert attrs.getValue('FMLCorePlugin') == corePlugin
+            if (corePlugin != null) {
+                assert attrs.getValue('FMLCorePluginContainsFMLMod') == 'true'
+                assert jar.getJarEntry(corePlugin.replace('.', '/') + '.class') != null
+            }
+            assert jar.getJarEntry('META-INF/outlands-relauncher/gson.jar') != null
+            jar.entries().findAll { it.name.endsWith('.class') }.each { entry ->
+                jar.getInputStream(entry).withCloseable(checkClassVersion)
+            }
+            def bootstrap = jar.getJarEntry('META-INF/outlands-relauncher/bootstrap.jar')
+            assert bootstrap != null
+            new java.util.zip.ZipInputStream(jar.getInputStream(bootstrap)).withCloseable { inner ->
+                def classes = []
+                for (def entry = inner.nextEntry; entry != null; entry = inner.nextEntry) {
+                    if (entry.name.endsWith('.class')) {
+                        classes.add(entry.name)
+                        checkClassVersion(inner)
+                    }
+                }
+                assert classes.contains('top/outlands/relauncher/bootstrap/PrepareMain.class')
+                assert classes.contains('top/outlands/relauncher/bootstrap/ChildMain.class')
+            }
+        }
+    }
+}
+tasks.named('check') { dependsOn verifyRelaunchJar }
