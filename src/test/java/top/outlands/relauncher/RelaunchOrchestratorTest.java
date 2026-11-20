@@ -85,7 +85,7 @@ class RelaunchOrchestratorTest {
                 stdin.write(payload);
             };
         }));
-        assertEquals(Arrays.asList("prepare", "game", "release-logs", "handoff", "close-stdin", "wait-game"), events);
+        assertEquals(Arrays.asList("prepare", "game", "release-logs", "handoff", "wait-game", "close-stdin"), events);
         assertArrayEquals(payload, game.stdin.toByteArray());
         assertEquals(RelaunchConfig.Mode.AUTO, RelaunchConfig.read(instance).mode);
         assertEquals(1, ui.confirmations);

@@ -40,6 +40,7 @@ public final class PrepareMain {
                     && ("amd64".equals(arch) || "x86_64".equals(arch))
                     && "25".equals(System.getProperty("java.specification.version")),
                     "Preparation requires Windows x64 and Java 25");
+            ParentPipe.watch(System.in);
             prepare(args, VerifiedCache::download, RELEASE);
         } catch (IOException | RuntimeException ex) {
             System.err.println("Outlands preparation failed: " + ex.getMessage());

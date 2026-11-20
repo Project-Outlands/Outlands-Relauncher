@@ -24,10 +24,12 @@ public final class GameArguments {
 
     private final Map<String, String> options;
     private final boolean fullscreen;
+    private final boolean demo;
 
-    private GameArguments(Map<String, String> options, boolean fullscreen) {
+    private GameArguments(Map<String, String> options, boolean fullscreen, boolean demo) {
         this.options = options;
         this.fullscreen = fullscreen;
+        this.demo = demo;
     }
 
     public static GameArguments capture(Map<?, ?> snapshot, Path gameDir) throws IOException {
@@ -54,7 +56,7 @@ public final class GameArguments {
             throw new IOException("The Forge instance's asset index or objects directory is missing");
         }
         options.put("--assetsDir", assets.toString());
-        return new GameArguments(options, snapshot.containsKey("--fullscreen"));
+        return new GameArguments(options, snapshot.containsKey("--fullscreen"), snapshot.containsKey("--demo"));
     }
 
     public List<String> resolve(Path launchProperties) throws IOException {
@@ -111,6 +113,7 @@ public final class GameArguments {
             }
         }
         if (fullscreen) result.add("--fullscreen=");
+        if (demo) result.add("--demo=");
         return result;
     }
 

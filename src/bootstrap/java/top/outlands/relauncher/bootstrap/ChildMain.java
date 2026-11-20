@@ -13,13 +13,15 @@ public final class ChildMain {
 
     public static void main(String[] ignored) {
         final String[] gameArguments;
-        try (InputStream input = System.in) {
+        InputStream input = System.in;
+        try {
             gameArguments = SessionWire.read(input);
         } catch (IOException e) {
             System.err.println("[Outlands Relauncher] Could not receive the game arguments: " + e.getClass().getSimpleName());
             System.exit(1);
             return;
         }
+        ParentPipe.watch(input);
         Foundation.main(gameArguments);
     }
 }

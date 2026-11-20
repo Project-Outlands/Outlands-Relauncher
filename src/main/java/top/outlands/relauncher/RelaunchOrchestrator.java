@@ -98,8 +98,11 @@ final class RelaunchOrchestrator {
                 failure = "Could not prepare Outlands. Check the preparation output and localInstaller setting.";
                 Process prepare = run.start(prepareCommand(java, gameDir, cache, run.dir, bootstrap, gson,
                         config.localInstaller(), ManagementFactory.getRuntimeMXBean().getInputArguments()));
-                prepare.getOutputStream().close();
-                int status = prepare.waitFor();
+                final int status;
+                // Both child JVMs treat this pipe closing as loss of their Forge owner.
+                try (OutputStream parentPipe = prepare.getOutputStream()) {
+                    status = prepare.waitFor();
+                }
                 if (status != 0) {
                     diagnostic("Outlands preparation exited with code " + status + ".");
                     throw new IOException("Preparation failed");
@@ -180,12 +183,12 @@ final class RelaunchOrchestrator {
             releaseLogs.run();
             failure = "Could not hand the session to the Outlands process.";
             handoff.write(stdin);
+            return waitUninterruptibly(child);
         } catch (IOException | RuntimeException | LinkageError handoffFailure) {
             diagnostic(failure);
             terminate(child);
             return 1;
         }
-        return waitUninterruptibly(child);
     }
 
     static void diagnostic(String message) {

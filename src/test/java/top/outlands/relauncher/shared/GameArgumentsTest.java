@@ -34,6 +34,7 @@ class GameArgumentsTest {
         Map<String, String> forge = forgeArguments();
         forge.put("--width", "1280");
         forge.put("--fullscreen", "");
+        forge.put("--demo", "");
         forge.put("--originalLauncherOption", "ignored");
         Path gameDir = root.resolve("存档 with spaces");
         Path plan = launchPlan(TEMPLATE);
@@ -45,7 +46,7 @@ class GameArgumentsTest {
                 "--gameDir", gameDir.toString(), "--assetsDir", forge.get("--assetsDir"), "--assetIndex", "1.12",
                 "--uuid", forge.get("--uuid"), "--accessToken", TOKEN, "--userType", "msa", "--tweakClass",
                 "net.minecraftforge.fml.common.launcher.FMLTweaker", "--versionType", "Outlands", "--width", "1280",
-                "--fullscreen="), arguments);
+                "--fullscreen=", "--demo="), arguments);
         assertTrue(Arrays.equals(before, Files.readAllBytes(plan)), "resolving does not write the session into the plan");
     }
 
