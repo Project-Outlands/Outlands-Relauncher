@@ -16,6 +16,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -33,7 +35,13 @@ class RelaunchOrchestratorTest {
         instance = Files.createDirectory(temp.resolve("Game with space 游戏")).toRealPath();
         java = Files.createFile(Files.createDirectories(instance.resolve("java home/bin")).resolve("java.exe"));
         config = instance.resolve("config/outlands-relauncher.properties");
-        installer = Files.createFile(Files.createDirectory(instance.resolve("installers")).resolve("local.jar"));
+        installer = Files.createDirectory(instance.resolve("installers")).resolve("local.jar");
+        try (ZipOutputStream jar = new ZipOutputStream(Files.newOutputStream(installer))) {
+            for (String name : Arrays.asList("version.json", "install_profile.json", "maven/top/outlands/outlands/1/outlands-1.jar")) {
+                jar.putNextEntry(new ZipEntry(name));
+                jar.closeEntry();
+            }
+        }
     }
 
     @Test
@@ -203,6 +211,23 @@ class RelaunchOrchestratorTest {
         assertEquals(RelaunchConfig.Mode.ASK, saved.mode);
         assertFalse(saved.settings().automatic);
         assertEquals("-Dexample=repaired", saved.settings().jvmArgs);
+    }
+
+    @Test
+    void corruptAutomaticInstallerOpensSettingsInsteadOfStartingPreparation() throws Exception {
+        Files.write(installer, new byte[] {1, 2, 3});
+        byte[] original = writeConfig("auto");
+        ui.selection = (initial, error, validator) -> {
+            assertEquals("installers/local.jar", initial.localInstaller);
+            assertTrue(error.contains("not a readable Outlands installer"));
+            return null;
+        };
+        RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
+                () -> fail("Should not stop logging"));
+        assertNull(launcher.launch(instance, dir -> fail("Should not capture session")));
+        assertEquals(1, ui.configurations);
+        assertArrayEquals(original, Files.readAllBytes(config));
+        assertFalse(Files.exists(instance.resolve(".outlands-relauncher")));
     }
 
     @Test

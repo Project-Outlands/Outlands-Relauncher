@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.ZipFile;
 
 import top.outlands.relauncher.shared.JvmOptions;
 
@@ -179,10 +180,7 @@ final class RelaunchOrchestrator {
             throw new IOException("Select a working Java 25 x64 bin/java.exe.");
         }
         Path installer = settingPath(gameDir, settings.localInstaller, "Outlands installer");
-        if (installer != null && (!Files.isRegularFile(installer)
-                || !installer.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar"))) {
-            throw new IOException("Select an existing Outlands installer .jar, or leave it empty to use the release.");
-        }
+        if (installer != null) validateInstaller(installer);
         List<String> options = JvmOptions.resolve(settings.xms, settings.xmx, settings.jvmArgs, inherited);
         try {
             if (optionProbe.accepts(java, gameDir, options)) {
@@ -192,6 +190,22 @@ final class RelaunchOrchestrator {
             throw new IOException("Could not verify the JVM parameters. Check that their characters are supported.", error);
         }
         throw new IOException("Java 25 did not accept the JVM parameters. Check the memory values and advanced options.");
+    }
+
+    private static void validateInstaller(Path installer) throws IOException {
+        if (!Files.isRegularFile(installer)
+                || !installer.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar")) {
+            throw new IOException("Select an existing Outlands installer .jar, or leave it empty to use the release.");
+        }
+        try (ZipFile jar = new ZipFile(installer.toFile())) {
+            if (jar.getEntry("version.json") == null || jar.getEntry("install_profile.json") == null
+                    || !jar.stream().anyMatch(entry -> entry.getName().startsWith("maven/top/outlands/outlands/")
+                            && entry.getName().endsWith(".jar") && !entry.isDirectory())) {
+                throw new IOException("Missing Outlands installer metadata or loader");
+            }
+        } catch (IOException invalid) {
+            throw new IOException("The selected JAR is not a readable Outlands installer. Choose another file or clear the path.", invalid);
+        }
     }
 
     private static Path settingPath(Path gameDir, String value, String label) throws IOException {
