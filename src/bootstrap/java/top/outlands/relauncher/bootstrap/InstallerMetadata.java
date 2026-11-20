@@ -34,12 +34,14 @@ final class InstallerMetadata {
 
     final String id;
     final List<String> game;
+    final List<String> jvm;
     final List<Artifact> classpath = new ArrayList<>();
     final List<Artifact> natives = new ArrayList<>();
 
-    private InstallerMetadata(String id, List<String> game) {
+    InstallerMetadata(String id, List<String> game, List<String> jvm) {
         this.id = id;
-        this.game = game;
+        this.game = Collections.unmodifiableList(new ArrayList<>(game));
+        this.jvm = Collections.unmodifiableList(new ArrayList<>(jvm));
     }
 
     static InstallerMetadata read(ZipFile installer, String osVersion) throws IOException {
@@ -65,47 +67,70 @@ final class InstallerMetadata {
         List<String> game = arguments.has("game") ? argumentList(arguments.get("game"), osVersion)
                 : legacyArguments(text(version, "minecraftArguments"));
         require(!game.isEmpty(), "Installer has no game argument template");
-        InstallerMetadata metadata = new InstallerMetadata(id, game);
+        InstallerMetadata metadata = new InstallerMetadata(id, game, Collections.emptyList());
         boolean foundLoader = false;
         for (JsonElement value : array(version.get("libraries"))) {
             JsonObject library = object(value);
             String name = text(library, "name");
-            if (!allowed(library, osVersion) || wrongWindowsLwjglArch(name)) continue;
-            JsonObject downloads = object(library.get("downloads"));
-            if (downloads.has("artifact")) {
-                boolean embedded = loader.equals(name);
-                require(!name.startsWith(LOADER_GROUP) || (embedded && !foundLoader),
-                        "Unexpected or duplicate Outlands loader");
-                Artifact artifact = Artifact.read(object(downloads.get("artifact")), null, embedded,
-                        Collections.emptyList());
-                if (embedded) {
-                    ZipEntry entry = installer.getEntry("maven/" + artifact.path);
-                    require(entry != null && !entry.isDirectory() && entry.getSize() == artifact.size,
-                            "Embedded Outlands loader missing or the wrong size");
-                    foundLoader = true;
-                }
-                metadata.classpath.add(artifact);
-            } else {
-                require(library.has("natives"), "Library has neither artifact nor natives");
-            }
-            if (library.has("natives")) {
-                JsonObject nativeNames = object(library.get("natives"));
-                if (!nativeNames.has("windows")) continue;
-                String classifier = text(nativeNames, "windows").replace("${arch}", "64");
-                List<String> excludes = new ArrayList<>();
-                if (library.has("extract")) {
-                    for (JsonElement exclude : array(object(library.get("extract")).get("exclude"))) {
-                        excludes.add(string(exclude));
-                    }
-                }
-                metadata.natives.add(Artifact.read(object(object(downloads.get("classifiers")).get(classifier)),
-                        null, false, excludes));
-            }
+            if (!selected(library, osVersion)) continue;
+            boolean embedded = loader.equals(name);
+            require(!name.startsWith(LOADER_GROUP) || (embedded && !foundLoader),
+                    "Unexpected or duplicate Outlands loader");
+            metadata.addLibrary(installer, library, null, embedded ? "maven/" : null);
+            foundLoader |= embedded;
         }
         require(foundLoader, "Installer has no verified embedded Outlands loader");
         metadata.classpath.add(Artifact.read(object(object(version.get("downloads")).get("client")),
-                "net/minecraft/client/1.12.2/client-1.12.2.jar", false, Collections.emptyList()));
+                "net/minecraft/client/1.12.2/client-1.12.2.jar", null, Collections.emptyList()));
         return metadata;
+    }
+
+    static boolean selected(JsonObject library, String osVersion) throws IOException {
+        return allowed(library, osVersion) && !wrongWindowsLwjglArch(text(library, "name"));
+    }
+
+    // A coordinate supplies missing paths in MMC metadata; installer metadata carries explicit paths.
+    void addLibrary(ZipFile zip, JsonObject library, String coordinate, String embeddedPrefix) throws IOException {
+        JsonObject downloads = object(library.get("downloads"));
+        if (downloads.has("artifact")) {
+            Artifact artifact = Artifact.read(object(downloads.get("artifact")),
+                    coordinate == null ? null : mavenPath(coordinate, null), embeddedPrefix, Collections.emptyList());
+            if (embeddedPrefix != null) {
+                ZipEntry entry = zip.getEntry(artifact.embeddedPath);
+                require(entry != null && !entry.isDirectory() && entry.getSize() == artifact.size,
+                        "Embedded Outlands loader missing or the wrong size");
+            }
+            classpath.add(artifact);
+        } else {
+            require(embeddedPrefix == null && library.has("natives"), "Library has neither artifact nor natives");
+        }
+        if (library.has("natives")) {
+            JsonObject nativeNames = object(library.get("natives"));
+            if (!nativeNames.has("windows")) return;
+            String classifier = text(nativeNames, "windows").replace("${arch}", "64");
+            List<String> excludes = new ArrayList<>();
+            if (library.has("extract")) {
+                for (JsonElement exclude : array(object(library.get("extract")).get("exclude"))) {
+                    excludes.add(string(exclude));
+                }
+            }
+            natives.add(Artifact.read(object(object(downloads.get("classifiers")).get(classifier)),
+                    coordinate == null ? null : mavenPath(coordinate, classifier), null, excludes));
+        }
+    }
+
+    static String mavenPath(String coordinate, String classifier) throws IOException {
+        String[] parts = coordinate.split(":", -1);
+        require(parts.length == 3 || parts.length == 4, "Unsupported JAR coordinate: " + coordinate);
+        for (String part : parts) {
+            require(part.matches("[A-Za-z0-9_+.-]+"), "Invalid JAR coordinate: " + coordinate);
+        }
+        if (classifier == null && parts.length == 4) classifier = parts[3];
+        require(classifier == null || classifier.matches("[A-Za-z0-9_+.-]+"), "Invalid JAR classifier");
+        String path = parts[0].replace('.', '/') + '/' + parts[1] + '/' + parts[2] + '/'
+                + parts[1] + '-' + parts[2] + (classifier == null ? "" : "-" + classifier) + ".jar";
+        VerifiedCache.validatePath(path);
+        return path;
     }
 
     private static boolean wrongWindowsLwjglArch(String name) {
@@ -156,7 +181,7 @@ final class InstallerMetadata {
         return allowed;
     }
 
-    private static List<String> argumentList(JsonElement list, String osVersion) throws IOException {
+    static List<String> argumentList(JsonElement list, String osVersion) throws IOException {
         List<String> result = new ArrayList<>();
         for (JsonElement value : array(list)) {
             if (value.isJsonObject()) {
@@ -174,7 +199,7 @@ final class InstallerMetadata {
         return result;
     }
 
-    private static List<String> legacyArguments(String arguments) throws IOException {
+    static List<String> legacyArguments(String arguments) throws IOException {
         List<String> tokens = new ArrayList<>();
         StringBuilder token = new StringBuilder();
         char quote = 0;
@@ -203,7 +228,7 @@ final class InstallerMetadata {
         return tokens;
     }
 
-    private static JsonObject readJson(ZipFile installer, String name) throws IOException {
+    static JsonObject readJson(ZipFile installer, String name) throws IOException {
         ZipEntry entry = installer.getEntry(name);
         require(entry != null && !entry.isDirectory() && entry.getSize() >= 0 && entry.getSize() <= MAX_JSON_BYTES,
                 "Missing or oversized installer metadata: " + name);
@@ -222,17 +247,17 @@ final class InstallerMetadata {
         }
     }
 
-    private static JsonObject object(JsonElement value) throws IOException {
+    static JsonObject object(JsonElement value) throws IOException {
         require(value != null && value.isJsonObject(), "Expected installer metadata object");
         return value.getAsJsonObject();
     }
 
-    private static JsonArray array(JsonElement value) throws IOException {
+    static JsonArray array(JsonElement value) throws IOException {
         require(value != null && value.isJsonArray(), "Expected installer metadata array");
         return value.getAsJsonArray();
     }
 
-    private static String string(JsonElement value) throws IOException {
+    static String string(JsonElement value) throws IOException {
         require(value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString(),
                 "Expected installer metadata string");
         String result = value.getAsString();
@@ -240,12 +265,12 @@ final class InstallerMetadata {
         return result;
     }
 
-    private static String text(JsonObject object, String key) throws IOException {
+    static String text(JsonObject object, String key) throws IOException {
         if (!object.has(key)) throw new IOException("Missing installer metadata field: " + key);
         return string(object.get(key));
     }
 
-    private static long integer(JsonObject object, String key) throws IOException {
+    static long integer(JsonObject object, String key) throws IOException {
         JsonElement value = object.get(key);
         require(value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber(),
                 "Missing installer numeric field: " + key);
@@ -267,17 +292,24 @@ final class InstallerMetadata {
         final String digest;
         final URI uri;
         final List<String> excludes;
+        final String embeddedPath;
 
         Artifact(String path, long size, String algorithm, String digest, URI uri, List<String> excludes) {
+            this(path, size, algorithm, digest, uri, excludes, null);
+        }
+
+        Artifact(String path, long size, String algorithm, String digest, URI uri, List<String> excludes,
+                String embeddedPath) {
             this.path = path;
             this.size = size;
             this.algorithm = algorithm;
             this.digest = digest;
             this.uri = uri;
             this.excludes = excludes;
+            this.embeddedPath = embeddedPath;
         }
 
-        static Artifact read(JsonObject object, String defaultPath, boolean embedded, List<String> excludes)
+        static Artifact read(JsonObject object, String defaultPath, String embeddedPrefix, List<String> excludes)
                 throws IOException {
             String path = object.has("path") ? text(object, "path") : defaultPath;
             VerifiedCache.validatePath(path);
@@ -288,9 +320,10 @@ final class InstallerMetadata {
             String hash = text(object, sha256 ? "sha256" : "sha1");
             require(hash.matches(sha256 ? "[a-f0-9A-F]{64}" : "[a-f0-9A-F]{40}"),
                     "Invalid artifact digest: " + path);
-            URI uri = embedded ? null : VerifiedCache.httpsUri(text(object, "url"));
+            URI uri = embeddedPrefix == null ? VerifiedCache.httpsUri(text(object, "url")) : null;
             return new Artifact(path, size, sha256 ? "SHA-256" : "SHA-1",
-                    hash.toLowerCase(java.util.Locale.ROOT), uri, excludes);
+                    hash.toLowerCase(java.util.Locale.ROOT), uri, excludes,
+                    embeddedPrefix == null ? null : embeddedPrefix + path);
         }
     }
 }
