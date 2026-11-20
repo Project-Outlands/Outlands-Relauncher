@@ -1,7 +1,7 @@
-package com.example.modid;
+package top.outlands.relauncher;
 
 /**
- * Tags storage class, you can change at will
+ * Build-generated mod metadata.
  */
 public final class Reference {
     private Reference() {
