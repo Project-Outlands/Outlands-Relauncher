@@ -87,6 +87,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         FutureTask<T> task = new FutureTask<>(() -> {
             LookAndFeel previous = UIManager.getLookAndFeel();
             String nativeSetting = System.getProperty(FlatSystemProperties.USE_NATIVE_LIBRARY);
+            Runnable restoreScale = WindowsUiScale.applyIfNeeded();
             try {
                 System.setProperty(FlatSystemProperties.USE_NATIVE_LIBRARY, "false");
                 if (!FlatDarkLaf.setup()) {
@@ -103,6 +104,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                 }
             } finally {
                 try {
+                    restoreScale.run();
                     UIManager.setLookAndFeel(previous);
                 } catch (UnsupportedLookAndFeelException restoreFailure) {
                     RelaunchOrchestrator.diagnostic("Could not restore the original desktop theme.");
