@@ -11,11 +11,13 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipFile;
 
 import top.outlands.relauncher.shared.JvmOptions;
+import top.outlands.relauncher.shared.PackSettings;
 
 final class RelaunchOrchestrator {
     private static final String RESOURCES = "/META-INF/outlands-relauncher/";
@@ -108,9 +110,12 @@ final class RelaunchOrchestrator {
                 Path bootstrap = extract(run.dir, "bootstrap.jar");
                 Path gson = extract(run.dir, "gson.jar");
                 Files.write(run.dir.resolve(JvmOptions.FILE_NAME), settings.options, StandardCharsets.UTF_8);
-                failure = "Could not prepare Outlands. Check the preparation output and localInstaller setting.";
+                try (OutputStream output = Files.newOutputStream(run.dir.resolve(PackSettings.FILE_NAME))) {
+                    settings.packOptions.store(output, null);
+                }
+                failure = "Could not prepare Outlands. Check the selected package, network settings, and preparation output.";
                 Process prepare = run.start(prepareCommand(settings.java, gameDir, cache, run.dir, bootstrap, gson,
-                        settings.installer));
+                        settings.archive));
                 final int status;
                 // Both child JVMs treat this pipe closing as loss of their Forge owner.
                 try (OutputStream parentPipe = prepare.getOutputStream()) {
@@ -180,11 +185,23 @@ final class RelaunchOrchestrator {
             throw new IOException("Select a working Java 25 x64 bin/java.exe.");
         }
         Path installer = settingPath(gameDir, settings.localInstaller, "Outlands installer");
-        if (installer != null) validateInstaller(installer);
+        Path mmc = settingPath(gameDir, settings.localMmcPack, "Outlands MMC pack");
+        if (installer != null && mmc != null) throw new IOException("Choose one local Outlands package, not both.");
+        if (installer != null) validateArchive(installer, false);
+        if (mmc != null) validateArchive(mmc, true);
+        Properties pack = new Properties();
+        pack.setProperty(PackSettings.RELEASE_VERSION, PackSettings.releaseVersion(settings.releaseVersion));
+        if (PackSettings.proxy(settings.proxy) != null) pack.setProperty(PackSettings.PROXY, settings.proxy.trim());
+        if (PackSettings.mirror(settings.mavenMirror) != null) pack.setProperty(PackSettings.MAVEN_MIRROR, settings.mavenMirror.trim());
+        Path libraries = settingPath(gameDir, settings.librariesDirectory, "Shared libraries directory");
+        if (libraries != null) {
+            if (!Files.isDirectory(libraries)) throw new IOException("Select an existing shared libraries directory.");
+            pack.setProperty(PackSettings.LIBRARIES_DIRECTORY, libraries.toString());
+        }
         List<String> options = JvmOptions.resolve(settings.xms, settings.xmx, settings.jvmArgs, inherited);
         try {
             if (optionProbe.accepts(java, gameDir, options)) {
-                return new ValidatedSettings(java, installer, options, settings, save);
+                return new ValidatedSettings(java, mmc == null ? installer : mmc, pack, options, settings, save);
             }
         } catch (IOException error) {
             throw new IOException("Could not verify the JVM parameters. Check that their characters are supported.", error);
@@ -192,19 +209,22 @@ final class RelaunchOrchestrator {
         throw new IOException("Java 25 did not accept the JVM parameters. Check the memory values and advanced options.");
     }
 
-    private static void validateInstaller(Path installer) throws IOException {
-        if (!Files.isRegularFile(installer)
-                || !installer.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar")) {
-            throw new IOException("Select an existing Outlands installer .jar, or leave it empty to use the release.");
+    private static void validateArchive(Path archive, boolean mmc) throws IOException {
+        String extension = mmc ? ".zip" : ".jar";
+        String label = mmc ? "MMC pack" : "installer";
+        if (!Files.isRegularFile(archive) || !archive.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(extension)) {
+            throw new IOException("Select an existing Outlands " + label + " " + extension + ", or leave it empty to use the release.");
         }
-        try (ZipFile jar = new ZipFile(installer.toFile())) {
-            if (jar.getEntry("version.json") == null || jar.getEntry("install_profile.json") == null
-                    || !jar.stream().anyMatch(entry -> entry.getName().startsWith("maven/top/outlands/outlands/")
-                            && entry.getName().endsWith(".jar") && !entry.isDirectory())) {
-                throw new IOException("Missing Outlands installer metadata or loader");
-            }
+        try (ZipFile zip = new ZipFile(archive.toFile())) {
+            boolean valid = mmc ? zip.stream().anyMatch(entry -> !entry.isDirectory()
+                    && entry.getName().matches("(?:[^/]+/)?mmc-pack\\.json"))
+                    : zip.getEntry("version.json") != null && zip.getEntry("install_profile.json") != null
+                    && zip.stream().anyMatch(entry -> entry.getName().startsWith("maven/top/outlands/outlands/")
+                            && entry.getName().endsWith(".jar") && !entry.isDirectory());
+            if (!valid) throw new IOException("Missing Outlands " + label + " metadata");
         } catch (IOException invalid) {
-            throw new IOException("The selected JAR is not a readable Outlands installer. Choose another file or clear the path.", invalid);
+            throw new IOException("The selected " + (mmc ? "ZIP" : "JAR") + " is not a readable Outlands " + label
+                    + ". Choose another file or clear the path.", invalid);
         }
     }
 
@@ -226,14 +246,17 @@ final class RelaunchOrchestrator {
 
     private static final class ValidatedSettings {
         final Path java;
-        final Path installer;
+        final Path archive;
+        final Properties packOptions;
         final List<String> options;
         final LaunchSettings selected;
         final boolean save;
 
-        ValidatedSettings(Path java, Path installer, List<String> options, LaunchSettings selected, boolean save) {
+        ValidatedSettings(Path java, Path archive, Properties packOptions, List<String> options, LaunchSettings selected,
+                          boolean save) {
             this.java = java;
-            this.installer = installer;
+            this.archive = archive;
+            this.packOptions = packOptions;
             this.options = options;
             this.selected = selected;
             this.save = save;

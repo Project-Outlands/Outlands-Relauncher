@@ -39,7 +39,8 @@ final class RelaunchConfig {
 
     LaunchSettings settings() {
         return new LaunchSettings(value("javaExecutable"), value("localInstaller"), value("xms"), value("xmx"),
-                value("jvmArgs"), mode == Mode.AUTO || !properties.containsKey("mode"));
+                value("jvmArgs"), mode == Mode.AUTO || !properties.containsKey("mode"), value("localMmcPack"),
+                value("releaseVersion"), value("proxy"), value("mavenMirror"), value("librariesDirectory"));
     }
 
     Path javaExecutable() {
@@ -71,6 +72,11 @@ final class RelaunchConfig {
         setOptional("xms", settings.xms);
         setOptional("xmx", settings.xmx);
         setOptional("jvmArgs", settings.jvmArgs);
+        setOptional("localMmcPack", settings.localMmcPack);
+        setOptional("releaseVersion", settings.releaseVersion);
+        setOptional("proxy", settings.proxy);
+        setOptional("mavenMirror", settings.mavenMirror);
+        setOptional("librariesDirectory", settings.librariesDirectory);
         Path temporary = Files.createTempFile(dir, "outlands-relauncher-", ".tmp");
         try {
             try (Writer writer = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8)) {

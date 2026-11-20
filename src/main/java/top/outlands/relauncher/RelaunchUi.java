@@ -6,17 +6,21 @@ import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.Frame;
+import java.awt.GraphicsConfiguration;
 import java.awt.GraphicsEnvironment;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.KeyboardFocusManager;
+import java.awt.Rectangle;
+import java.awt.Toolkit;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
+import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.atomic.AtomicReference;
@@ -45,6 +49,8 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 
 import com.formdev.flatlaf.FlatDarkLaf;
 import com.formdev.flatlaf.FlatSystemProperties;
+
+import top.outlands.relauncher.shared.PackSettings;
 
 final class RelaunchUi implements RelaunchOrchestrator.Interaction {
     private static final String TITLE = "Outlands Relauncher";
@@ -139,7 +145,11 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
     @SuppressWarnings("serial")
     private static final class SettingsDialog extends JDialog {
         private final JTextField javaPath = field("javaExecutable", 28);
-        private final JTextField installer = field("localInstaller", 28);
+        private final JTextField localPackage = field("localOutlandsPackage", 28);
+        private final JTextField releaseVersion = field("releaseVersion", 28);
+        private final JTextField proxy = field("proxy", 28);
+        private final JTextField mavenMirror = field("mavenMirror", 28);
+        private final JTextField librariesDirectory = field("librariesDirectory", 28);
         private final JTextField xms = field("xms", 12);
         private final JTextField xmx = field("xmx", 12);
         private final JTextArea jvmArgs = new JTextArea(5, 28);
@@ -149,7 +159,9 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final JButton forge = new JButton("Continue Forge");
         private final JToggleButton advancedToggle = new JToggleButton("Show advanced settings");
         private final JButton browseJava = new JButton("Browse...");
-        private final JButton browseInstaller = new JButton("Browse...");
+        private final JButton browsePackage = new JButton("Browse...");
+        private final JButton browseLibraries = new JButton("Browse...");
+        private final JButton clearLibraries = new JButton("Clear");
         private final RelaunchOrchestrator.SettingsValidator validator;
         private SwingWorker<Void, Void> validation;
         private LaunchSettings result;
@@ -170,7 +182,12 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     JComponent.WHEN_IN_FOCUSED_WINDOW);
 
             javaPath.setText(initial.javaExecutable);
-            installer.setText(initial.localInstaller);
+            localPackage.setText(initial.localMmcPack.isEmpty() ? initial.localInstaller : initial.localMmcPack);
+            releaseVersion.setText(initial.releaseVersion);
+            proxy.setText(initial.proxy);
+            mavenMirror.setText(initial.mavenMirror);
+            librariesDirectory.setText(initial.librariesDirectory);
+            librariesDirectory.setEditable(false);
             xms.setText(initial.xms);
             xmx.setText(initial.xmx);
             jvmArgs.setName("jvmArgs");
@@ -190,19 +207,41 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     "Java executable (*.exe)", "exe"));
 
             JPanel advanced = new JPanel(new GridBagLayout());
-            addRow(advanced, 0, label("Local installer:", KeyEvent.VK_S, installer), installer, browseInstaller);
-            addNote(advanced, 1, "Leave blank to use the default Outlands release.");
-            addRow(advanced, 2, label("Extra JVM options:", KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
-            addNote(advanced, 3, "Enter one complete JVM option per line, without shell quoting.");
+            addRow(advanced, 0, label("Local Outlands package:", KeyEvent.VK_P, localPackage), localPackage,
+                    browsePackage);
+            addNote(advanced, 1, "MMC pack (.zip) or installer (.jar). Leave blank to use a release.");
+            addRow(advanced, 2, label("Release version:", KeyEvent.VK_R, releaseVersion), releaseVersion, null);
+            addNote(advanced, 3, "Leave blank for the pinned release (" + PackSettings.DEFAULT_VERSION + ").");
+            addRow(advanced, 4, label("Proxy URL:", KeyEvent.VK_U, proxy), proxy, null);
+            addNote(advanced, 5, "Optional HTTP or SOCKS URL with host and port, no authentication.");
+            addRow(advanced, 6, label("Maven Central mirror:", KeyEvent.VK_V, mavenMirror), mavenMirror, null);
+            addNote(advanced, 7, "Optional HTTPS mirror URL. Leave blank to use Maven Central.");
+            JPanel libraryButtons = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
+            libraryButtons.add(browseLibraries);
+            libraryButtons.add(clearLibraries);
+            addRow(advanced, 8, label("Libraries directory:", KeyEvent.VK_D, librariesDirectory), librariesDirectory,
+                    libraryButtons);
+            addNote(advanced, 9, "Optional read-only Maven libraries; missing files use the private cache.");
+            addRow(advanced, 10, label("Extra JVM options:", KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
+            addNote(advanced, 11, "Enter one complete JVM option per line, without shell quoting.");
             // Keep keyboard tab traversal consistent with the other input fields.
             jvmArgs.setFocusTraversalKeysEnabled(true);
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.FORWARD_TRAVERSAL_KEYS,
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0)));
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS,
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, KeyEvent.SHIFT_DOWN_MASK)));
-            browseInstaller.getAccessibleContext().setAccessibleName("Browse for a local Outlands installer");
-            browseInstaller.addActionListener(event -> browse(installer, "Select an Outlands installer JAR",
-                    "Outlands installer (*.jar)", "jar"));
+            browsePackage.getAccessibleContext().setAccessibleName("Browse for a local Outlands package");
+            browsePackage.addActionListener(event -> browse(localPackage, "Select a local Outlands package",
+                    "Outlands packages (*.zip, *.jar)", "zip", "jar"));
+            browseLibraries.getAccessibleContext().setAccessibleName("Browse for a libraries directory");
+            browseLibraries.addActionListener(event -> {
+                JFileChooser chooser = new JFileChooser();
+                chooser.setDialogTitle("Select a libraries directory");
+                chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+                choosePath(librariesDirectory, chooser);
+            });
+            clearLibraries.getAccessibleContext().setAccessibleName("Use the default libraries directory");
+            clearLibraries.addActionListener(event -> librariesDirectory.setText(""));
 
             JPanel toggle = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
             advancedToggle.setMnemonic(KeyEvent.VK_A);
@@ -220,10 +259,11 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                 options.repaint();
                 if (expanded) {
                     Dimension preferred = getPreferredSize();
-                    int screenHeight = getGraphicsConfiguration().getBounds().height;
-                    int height = Math.max(getHeight(), Math.min(preferred.height, screenHeight * 4 / 5));
-                    if (height != getHeight()) {
-                        setSize(getWidth(), height);
+                    Dimension limit = screenSizeLimit();
+                    int width = Math.max(getWidth(), Math.min(preferred.width, limit.width));
+                    int height = Math.max(getHeight(), Math.min(preferred.height, limit.height));
+                    if (width != getWidth() || height != getHeight()) {
+                        setSize(width, height);
                         setLocationRelativeTo(null);
                     }
                 }
@@ -273,14 +313,28 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             setContentPane(content);
             getRootPane().setDefaultButton(launch);
             pack();
+            Dimension limit = screenSizeLimit();
+            setSize(Math.min(getWidth(), limit.width), Math.min(getHeight(), limit.height));
             setMinimumSize(new Dimension(Math.min(getWidth(), 440), Math.min(getHeight(), 300)));
             setLocationRelativeTo(null);
         }
 
-        private void browse(JTextField field, String title, String description, String extension) {
+        private Dimension screenSizeLimit() {
+            GraphicsConfiguration screen = getGraphicsConfiguration();
+            Rectangle bounds = screen.getBounds();
+            Insets insets = Toolkit.getDefaultToolkit().getScreenInsets(screen);
+            return new Dimension((bounds.width - insets.left - insets.right) * 9 / 10,
+                    (bounds.height - insets.top - insets.bottom) * 4 / 5);
+        }
+
+        private void browse(JTextField field, String title, String description, String... extensions) {
             JFileChooser chooser = new JFileChooser();
             chooser.setDialogTitle(title);
-            chooser.setFileFilter(new FileNameExtensionFilter(description, extension));
+            chooser.setFileFilter(new FileNameExtensionFilter(description, extensions));
+            choosePath(field, chooser);
+        }
+
+        private void choosePath(JTextField field, JFileChooser chooser) {
             File current = new File(field.getText());
             if (current.isAbsolute()) {
                 chooser.setSelectedFile(current);
@@ -294,8 +348,12 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             if (validation != null) {
                 return;
             }
-            LaunchSettings candidate = new LaunchSettings(javaPath.getText(), installer.getText(), xms.getText(),
-                    xmx.getText(), jvmArgs.getText(), automatic.isSelected());
+            String packagePath = localPackage.getText().trim();
+            boolean mmcPack = packagePath.toLowerCase(Locale.ROOT).endsWith(".zip");
+            LaunchSettings candidate = new LaunchSettings(javaPath.getText(), mmcPack ? "" : packagePath,
+                    xms.getText(), xmx.getText(), jvmArgs.getText(), automatic.isSelected(), mmcPack ? packagePath : "",
+                    releaseVersion.getText().trim(), proxy.getText().trim(), mavenMirror.getText().trim(),
+                    librariesDirectory.getText());
             setEditing(false);
             showStatus("Checking launch settings...");
             validation = new SwingWorker<Void, Void>() {
@@ -337,8 +395,9 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
 
         private void setEditing(boolean enabled) {
-            for (JComponent component : new JComponent[] {javaPath, installer, xms, xmx, jvmArgs, automatic,
-                    browseJava, browseInstaller, launch}) {
+            for (JComponent component : new JComponent[] {javaPath, localPackage, releaseVersion, proxy, mavenMirror,
+                    librariesDirectory, xms, xmx, jvmArgs, automatic, browseJava, browsePackage, browseLibraries,
+                    clearLibraries, launch}) {
                 component.setEnabled(enabled);
             }
         }
@@ -371,7 +430,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             return label;
         }
 
-        private static void addRow(JPanel panel, int row, JLabel label, JComponent field, JButton browse) {
+        private static void addRow(JPanel panel, int row, JLabel label, JComponent field, JComponent browse) {
             GridBagConstraints constraints = new GridBagConstraints();
             constraints.gridx = 0;
             constraints.gridy = row;

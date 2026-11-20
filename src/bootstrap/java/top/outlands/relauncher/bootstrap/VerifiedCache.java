@@ -4,24 +4,32 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Proxy;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import javax.net.ssl.HttpsURLConnection;
 
+import static top.outlands.relauncher.bootstrap.InstallerMetadata.MAX_ARTIFACT_BYTES;
 import static top.outlands.relauncher.bootstrap.InstallerMetadata.require;
 
 final class VerifiedCache {
+    private static final String CENTRAL = "https://repo.maven.apache.org/maven2/";
     private static final int MAX_REDIRECTS = 5;
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 15_000;
@@ -36,17 +44,60 @@ final class VerifiedCache {
     }
 
     private final Path root;
+    private final Path libraries;
     private final Downloader downloader;
+    private final DownloadOptions options;
 
     VerifiedCache(Path root, Downloader downloader) throws IOException {
-        this.root = Files.createDirectories(root).toRealPath();
+        this(root, downloader, DownloadOptions.DEFAULT);
+    }
+
+    VerifiedCache(Path root, Downloader downloader, DownloadOptions options) throws IOException {
+        this.root = root.toAbsolutePath().normalize();
+        libraries = options.librariesDirectory == null ? null : resolveExistingAncestors(options.librariesDirectory);
+        checkPrivateRoot();
         this.downloader = downloader;
+        this.options = options;
+    }
+
+    private void checkPrivateRoot() throws IOException {
+        if (libraries == null) return;
+        Path resolved = resolveExistingAncestors(root);
+        require(!resolved.startsWith(libraries) && !libraries.startsWith(resolved),
+                "librariesDirectory and the private cache must not overlap");
+    }
+
+    private static Path resolveExistingAncestors(Path path) throws IOException {
+        Path existing = path;
+        while (true) {
+            try {
+                return existing.toRealPath().resolve(existing.relativize(path));
+            } catch (NoSuchFileException ex) {
+                existing = existing.getParent();
+                if (existing == null) throw ex;
+            }
+        }
+    }
+
+    private Path findShared(InstallerMetadata.Artifact artifact) {
+        if (libraries == null) return null;
+        Path candidate = libraries.resolve(artifact.path);
+        try {
+            return verified(candidate, artifact) ? candidate : null;
+        } catch (IOException | SecurityException ignored) {
+            // Unreadable or redirected shared entries are misses; never repair them in place.
+            return null;
+        }
     }
 
     Path obtain(InstallerMetadata.Artifact artifact, Source embedded) throws IOException {
+        validatePath(artifact.path);
+        Path shared = findShared(artifact);
+        if (shared != null) return shared;
         // Disjoint content keeps two manifests from replacing each other's JARs while a game is running.
         String relative = artifact.algorithm.toLowerCase(Locale.ROOT) + "/" + artifact.digest + "/" + artifact.path;
-        Path target = resolveForWrite(root, relative);
+        checkPrivateRoot();
+        Path target = resolveForWrite(Files.createDirectories(root).toRealPath(), relative);
         if (verified(target, artifact)) return target;
         Path tmp = Files.createTempFile(target.getParent(), ".outlands-", ".part");
         try {
@@ -70,44 +121,57 @@ final class VerifiedCache {
     }
 
     private void fetch(InstallerMetadata.Artifact artifact, Path tmp) throws IOException {
-        IOException firstFailure = null;
-        for (URI uri : downloadUris(artifact)) {
+        List<IOException> failures = new ArrayList<>();
+        for (URI uri : downloadUris(artifact, options)) {
             System.out.println("Fetching " + artifact.path + " from " + uri.getHost());
             try {
                 copyVerified(artifact, () -> downloader.open(uri), tmp);
                 return;
             } catch (IOException ex) {
-                IOException failure = new IOException(uri.getHost() + ": " + ex.getMessage(), ex);
-                if (firstFailure != null) {
-                    failure.addSuppressed(firstFailure);
-                    throw new IOException(firstFailure.getMessage() + "; fallback " + failure.getMessage(), failure);
-                }
-                firstFailure = failure;
+                failures.add(new IOException(uri.getHost() + ": " + ex.getMessage(), ex));
             }
         }
-        throw firstFailure;
+        if (failures.size() == 1) throw failures.get(0);
+        List<String> messages = new ArrayList<>();
+        for (IOException failure : failures) messages.add(failure.getMessage());
+        IOException failure = new IOException(String.join("; ", messages));
+        for (IOException cause : failures) failure.addSuppressed(cause);
+        throw failure;
     }
 
     private static void copyVerified(InstallerMetadata.Artifact artifact, Source source, Path tmp) throws IOException {
         try (InputStream input = source.open(); OutputStream output = Files.newOutputStream(tmp)) {
             MessageDigest digest = digest(artifact.algorithm);
-            long count = copy(input, output, artifact.size, digest, System.nanoTime());
-            require(count == artifact.size && artifact.digest.equals(hex(digest.digest())),
+            long count = copy(input, output, sizeLimit(artifact), digest, System.nanoTime());
+            require(validSize(artifact, count) && artifact.digest.equals(hex(digest.digest())),
                     "Wrong size or digest for " + artifact.path);
         }
     }
 
     static List<URI> downloadUris(InstallerMetadata.Artifact artifact) throws IOException {
+        return downloadUris(artifact, DownloadOptions.DEFAULT);
+    }
+
+    private static List<URI> downloadUris(InstallerMetadata.Artifact artifact, DownloadOptions options)
+            throws IOException {
         URI original = checkHttps(artifact.uri);
         String path = artifact.path;
         validatePath(path);
         if ((original.getPort() == -1 || original.getPort() == 443) && original.getRawQuery() == null) {
+            String host = original.getHost();
             String originalPath = original.getRawPath();
-            if ("maven.aliyun.com".equalsIgnoreCase(original.getHost())
-                    && ("/repository/central/" + path).equals(originalPath)) {
-                return Arrays.asList(URI.create("https://repo.maven.apache.org/maven2/" + path), original);
+            boolean aliyun = "maven.aliyun.com".equalsIgnoreCase(host)
+                    && ("/repository/central/" + path).equals(originalPath);
+            boolean central = ("repo.maven.apache.org".equalsIgnoreCase(host) || "repo1.maven.org".equalsIgnoreCase(host))
+                    && ("/maven2/" + path).equals(originalPath);
+            if (aliyun || (central && options.mavenMirror != null)) {
+                Set<URI> candidates = new LinkedHashSet<>();
+                if (options.mavenMirror != null) candidates.add(options.mavenMirror.resolve(path));
+                candidates.add(aliyun ? URI.create(CENTRAL + path) : original);
+                candidates.add(original);
+                return new ArrayList<>(candidates);
             }
-            if ("nexus.jsdu.cn".equalsIgnoreCase(original.getHost()) && path.startsWith("top/outlands/")
+            if ("nexus.jsdu.cn".equalsIgnoreCase(host) && path.startsWith("top/outlands/")
                     && ("/repository/" + path).equals(originalPath)) {
                 return Arrays.asList(URI.create("https://maven.outlands.top/releases/" + path), original);
             }
@@ -119,12 +183,21 @@ final class VerifiedCache {
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return false;
         require(Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) && file.equals(file.toRealPath()),
                 "Cache entry is not a regular file: " + artifact.path);
-        if (Files.size(file) != artifact.size) return false;
+        if (!validSize(artifact, Files.size(file))) return false;
         MessageDigest digest = digest(artifact.algorithm);
         try (InputStream input = Files.newInputStream(file)) {
-            return copy(input, null, artifact.size, digest, 0) == artifact.size
+            return validSize(artifact, copy(input, null, sizeLimit(artifact), digest, 0))
                     && artifact.digest.equals(hex(digest.digest()));
         }
+    }
+
+    // Synthetic artifacts with an independently published digest (e.g. an MMC ZIP) can omit size.
+    private static long sizeLimit(InstallerMetadata.Artifact artifact) {
+        return artifact.size == -1 ? MAX_ARTIFACT_BYTES : artifact.size;
+    }
+
+    private static boolean validSize(InstallerMetadata.Artifact artifact, long actual) {
+        return artifact.size == -1 ? actual > 0 && actual <= MAX_ARTIFACT_BYTES : actual == artifact.size;
     }
 
     static URI httpsUri(String value) throws IOException {
@@ -146,8 +219,14 @@ final class VerifiedCache {
     }
 
     static InputStream download(URI uri) throws IOException {
+        return download(uri, null);
+    }
+
+    static InputStream download(URI uri, Proxy proxy) throws IOException {
         for (int redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-            HttpsURLConnection connection = (HttpsURLConnection) checkHttps(uri).toURL().openConnection();
+            URL url = checkHttps(uri).toURL();
+            HttpsURLConnection connection = (HttpsURLConnection) (proxy == null
+                    ? url.openConnection() : url.openConnection(proxy));
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
             connection.setReadTimeout(READ_TIMEOUT_MS);

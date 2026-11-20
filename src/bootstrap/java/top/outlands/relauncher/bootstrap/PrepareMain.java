@@ -1,6 +1,7 @@
 package top.outlands.relauncher.bootstrap;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -17,15 +18,16 @@ import java.util.zip.ZipFile;
 
 import top.outlands.relauncher.shared.JavaArgFile;
 import top.outlands.relauncher.shared.JvmOptions;
+import top.outlands.relauncher.shared.PackSettings;
 
 import static top.outlands.relauncher.bootstrap.InstallerMetadata.require;
 
 /** Isolated preparation process; never receives resolved game arguments or login details. */
 public final class PrepareMain {
-    private static final String RELEASE_INSTALLER = "top/outlands/outlands/2026.11.16/outlands-2026.11.16-installer.jar";
-    private static final InstallerMetadata.Artifact RELEASE = new InstallerMetadata.Artifact(RELEASE_INSTALLER,
-            6_619_705L, "SHA-256", "6b9abc14d7d7a212dbf95543e3769ef7649b1a42dad65fd1773f81d99c46c730",
-            URI.create("https://maven.outlands.top/releases/" + RELEASE_INSTALLER), Collections.emptyList());
+    private static final String RELEASE_PATH = releasePath(PackSettings.DEFAULT_VERSION);
+    private static final InstallerMetadata.Artifact RELEASE = new InstallerMetadata.Artifact(RELEASE_PATH,
+            288_995L, "SHA-256", "f55bac455fb68a54ce52b9feed654123a677ca72beef1c30421e7e528f153c9e",
+            releaseUri(RELEASE_PATH), Collections.emptyList());
     private static final String CHILD_MAIN = "top.outlands.relauncher.bootstrap.ChildMain";
 
     private PrepareMain() {}
@@ -33,14 +35,19 @@ public final class PrepareMain {
     public static void main(String[] args) {
         try {
             require(args.length == 4,
-                    "Expected cacheDir, runDir, localInstaller (or empty), bootstrapJar");
+                    "Expected cacheDir, runDir, local MMC pack / installer (or empty), bootstrapJar");
             String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
             require(System.getProperty("os.name", "").startsWith("Windows")
                     && ("amd64".equals(arch) || "x86_64".equals(arch))
                     && "25".equals(System.getProperty("java.specification.version")),
                     "Preparation requires Windows x64 and Java 25");
             ParentPipe.watch(System.in);
-            prepare(args, VerifiedCache::download, RELEASE);
+            Properties settings = readPackOptions(Paths.get(args[1]));
+            DownloadOptions options = DownloadOptions.read(settings, Paths.get("").toAbsolutePath());
+            String version = PackSettings.releaseVersion(settings.getProperty(PackSettings.RELEASE_VERSION, ""));
+            InstallerMetadata.Artifact release = args[2].isEmpty() && !PackSettings.DEFAULT_VERSION.equals(version)
+                    ? customRelease(Paths.get(args[0]), options::download, version) : RELEASE;
+            prepare(args, options::download, release, options);
         } catch (IOException | RuntimeException ex) {
             System.err.println("Outlands preparation failed: " + ex.getMessage());
             System.exit(1);
@@ -49,6 +56,11 @@ public final class PrepareMain {
 
     static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release)
             throws IOException {
+        prepare(args, downloader, release, DownloadOptions.DEFAULT);
+    }
+
+    static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release,
+                        DownloadOptions options) throws IOException {
         Path runDir = Paths.get(args[1]).toRealPath();
         require(Files.isDirectory(runDir), "Run directory must already exist");
         Path argFile = runDir.resolve("java.args");
@@ -57,18 +69,24 @@ public final class PrepareMain {
                 && !Files.exists(propertiesFile, LinkOption.NOFOLLOW_LINKS)
                 && !Files.exists(runDir.resolve("natives"), LinkOption.NOFOLLOW_LINKS), "Run directory was already used");
         Path bootstrapJar = absoluteFile(args[3], "Bootstrap JAR");
-        List<String> jvm = readJvmOptions(runDir);
-        VerifiedCache cache = new VerifiedCache(Paths.get(args[0]), downloader);
-        Path installer = args[2].isEmpty() ? cache.obtain(release, null) : absoluteFile(args[2], "Local installer");
+        List<String> userJvm = readJvmOptions(runDir);
+        VerifiedCache cache = new VerifiedCache(Paths.get(args[0]), downloader, options);
+        Path archive = args[2].isEmpty() ? cache.obtain(release, null) : absoluteFile(args[2], "Local Outlands package");
+        boolean mmc = (args[2].isEmpty() ? release.path : args[2]).toLowerCase(Locale.ROOT).endsWith(".zip");
         List<String> classpath = new ArrayList<>();
         Path natives = runDir.resolve("natives");
         InstallerMetadata metadata;
-        try (ZipFile zip = new ZipFile(installer.toFile())) {
-            metadata = InstallerMetadata.read(zip, System.getProperty("os.version", ""));
+        try (ZipFile zip = new ZipFile(archive.toFile())) {
+            String osVersion = System.getProperty("os.version", "");
+            metadata = mmc ? MmcMetadata.read(zip, osVersion) : InstallerMetadata.read(zip, osVersion);
+            if (mmc && args[2].isEmpty()) {
+                require(release.path.equals(releasePath(metadata.id.substring("1.12.2-Outlands-".length()))),
+                        "Outlands release does not match the requested MMC package version");
+            }
             System.out.println("Preparing Outlands " + metadata.id);
             for (InstallerMetadata.Artifact artifact : metadata.classpath) {
-                VerifiedCache.Source embedded = artifact.uri == null
-                        ? () -> zip.getInputStream(zip.getEntry("maven/" + artifact.path)) : null;
+                VerifiedCache.Source embedded = artifact.embeddedPath == null
+                        ? null : () -> zip.getInputStream(zip.getEntry(artifact.embeddedPath));
                 classpath.add(classpathEntry(cache.obtain(artifact, embedded)));
             }
             NativeExtractor extractor = new NativeExtractor(natives);
@@ -77,6 +95,8 @@ public final class PrepareMain {
             }
         }
         classpath.add(classpathEntry(bootstrapJar));
+        List<String> jvm = new ArrayList<>(metadata.jvm);
+        jvm.addAll(userJvm);
         jvm.add("-Doutlands.relauncher.child=true");
         jvm.add("-Djava.library.path=" + natives);
         jvm.add("-cp");
@@ -92,6 +112,50 @@ public final class PrepareMain {
         }
         writeAtomically(propertiesFile, output -> properties.store(output, null));
         System.out.println("Outlands preparation complete");
+    }
+
+    private static Properties readPackOptions(Path runDir) throws IOException {
+        Properties properties = new Properties();
+        Path settings = runDir.resolve(PackSettings.FILE_NAME);
+        if (!Files.exists(settings, LinkOption.NOFOLLOW_LINKS)) return properties;
+        require(Files.isRegularFile(settings, LinkOption.NOFOLLOW_LINKS) && Files.size(settings) <= 32 * 1024,
+                "Invalid pack options file");
+        try (InputStream input = Files.newInputStream(settings)) {
+            properties.load(input);
+        }
+        return properties;
+    }
+
+    private static String releasePath(String version) {
+        return "top/outlands/outlands/" + version + "/outlands-" + version + "-mmc.zip";
+    }
+
+    private static URI releaseUri(String path) {
+        return URI.create("https://maven.outlands.top/releases/" + path);
+    }
+
+    // Remember a previously verified release descriptor so a selected version can launch offline too.
+    private static InstallerMetadata.Artifact customRelease(Path cache, VerifiedCache.Downloader downloader, String version)
+            throws IOException {
+        Path root = Files.createDirectories(cache).toRealPath();
+        Path descriptor = VerifiedCache.resolveForWrite(root, "releases/" + version + ".sha256");
+        String path = releasePath(version);
+        String hash;
+        if (Files.isRegularFile(descriptor, LinkOption.NOFOLLOW_LINKS) && Files.size(descriptor) <= 128) {
+            hash = checksum(Files.readAllBytes(descriptor));
+        } else {
+            try (InputStream stream = downloader.open(releaseUri(path + ".sha256"))) {
+                hash = checksum(VerifiedCache.readBytes(stream, 128));
+            }
+            writeAtomically(descriptor, output -> output.write(hash.getBytes(StandardCharsets.US_ASCII)));
+        }
+        return new InstallerMetadata.Artifact(path, -1, "SHA-256", hash, releaseUri(path), Collections.emptyList());
+    }
+
+    private static String checksum(byte[] bytes) throws IOException {
+        String value = new String(bytes, StandardCharsets.US_ASCII).trim().toLowerCase(Locale.ROOT);
+        require(value.matches("[a-f0-9]{64}"), "Outlands Maven returned an invalid MMC package SHA-256");
+        return value;
     }
 
     private static Path absoluteFile(String input, String label) throws IOException {

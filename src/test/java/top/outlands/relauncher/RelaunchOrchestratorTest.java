@@ -14,6 +14,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -211,6 +212,41 @@ class RelaunchOrchestratorTest {
         assertEquals(RelaunchConfig.Mode.ASK, saved.mode);
         assertFalse(saved.settings().automatic);
         assertEquals("-Dexample=repaired", saved.settings().jvmArgs);
+    }
+
+    @Test
+    void localMmcAndDownloadSettingsReachPreparationWithoutChangingTheInstance() throws Exception {
+        Path mmc = instance.resolve("installers/local.zip");
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(mmc))) {
+            zip.putNextEntry(new ZipEntry("pack/mmc-pack.json"));
+            zip.closeEntry();
+        }
+        Path libraries = Files.createDirectory(instance.resolve("library share"));
+        Files.createDirectories(config.getParent());
+        Files.write(config, ("mode=auto\njavaExecutable=java home/bin/java.exe\nlocalMmcPack=installers/local.zip\n"
+                + "releaseVersion=2026.11.14\nproxy=http://localhost:8080\n"
+                + "mavenMirror=https://mirror.example/maven/\nlibrariesDirectory=library share\n")
+                .getBytes(StandardCharsets.UTF_8));
+        byte[] original = Files.readAllBytes(config);
+        RelaunchOrchestrator launcher = launcher(builder -> {
+            List<String> command = builder.command();
+            assertEquals(mmc.toString(), command.get(6));
+            Properties properties = new Properties();
+            try (InputStream input = Files.newInputStream(Paths.get(command.get(5), "pack-options.properties"))) {
+                properties.load(input);
+            }
+            assertEquals("2026.11.14", properties.getProperty("releaseVersion"));
+            assertEquals("http://localhost:8080", properties.getProperty("proxy"));
+            assertEquals("https://mirror.example/maven/", properties.getProperty("mavenMirror"));
+            assertEquals(libraries.toString(), properties.getProperty("librariesDirectory"));
+            return new FakeProcess(1, new ArrayList<>(), false);
+        }, () -> fail("Forge logging must remain available"));
+        assertNull(launcher.launch(instance, dir -> metadata -> fail("Preparation did not finish")));
+        assertEquals(0, ui.configurations);
+        assertArrayEquals(original, Files.readAllBytes(config));
+        try (Stream<Path> entries = Files.list(libraries)) {
+            assertEquals(0, entries.count());
+        }
     }
 
     @Test
