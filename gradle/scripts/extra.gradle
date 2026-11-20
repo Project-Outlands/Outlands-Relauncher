@@ -73,8 +73,27 @@ tasks.named('processResources', ProcessResources) {
     }
 }
 
+// Relocate the look and feel so it does not conflict with another Forge mod's FlatLaf.
+def flatLafPackage = 'top.outlands.relauncher.internal.flatlaf'
+def flatLafPath = flatLafPackage.replace('.', '/')
+def archives = services.get(ArchiveOperations)
+def flatLafZip = configurations.flatLafUi.elements.map { jars -> archives.zipTree(jars.iterator().next().asFile) }
+tasks.named('processResources', ProcessResources) {
+    from(flatLafZip) {
+        include 'com/formdev/flatlaf/**/*.properties'
+        includeEmptyDirs = false
+        eachFile { entry -> entry.path = entry.path.replace('com/formdev/flatlaf', flatLafPath) }
+        filteringCharset = 'UTF-8'
+        filter { line -> line.replace('com.formdev.flatlaf', flatLafPackage) }
+    }
+}
+tasks.named('shadowJar') {
+    relocate 'com.formdev.flatlaf', flatLafPackage
+    exclude 'com/formdev/flatlaf/**/*.properties', 'com/formdev/flatlaf/natives/**', 'META-INF/versions/**'
+}
+
 // Check the distributable (not the dev jar), including the isolated bootstrap's bytecode.
-def distributable = tasks.named('reobfJar').flatMap { it.archiveFile }
+def distributable = tasks.named('reobfShadowJar').flatMap { it.archiveFile }
 def corePlugin = property('is_coremod').toBoolean() ? property('coremod_plugin_class_name') : null
 def verifyRelaunchJar = tasks.register('verifyRelaunchJar') {
     inputs.file(distributable)
@@ -93,6 +112,16 @@ def verifyRelaunchJar = tasks.register('verifyRelaunchJar') {
                 assert jar.getJarEntry(corePlugin.replace('.', '/') + '.class') != null
             }
             assert jar.getJarEntry('META-INF/outlands-relauncher/gson.jar') != null
+            assert jar.getJarEntry(flatLafPath + '/FlatDarkLaf.class') != null
+            assert jar.getJarEntry('META-INF/LICENSE') != null
+            def uiDefaults = jar.getJarEntry(flatLafPath + '/FlatLaf.properties')
+            assert uiDefaults != null
+            jar.getInputStream(uiDefaults).withCloseable { stream ->
+                def defaults = new Properties()
+                defaults.load(stream)
+                assert defaults.getProperty('ButtonUI') == flatLafPackage + '.ui.FlatButtonUI'
+            }
+            assert !jar.entries().any { it.name.startsWith('com/formdev/flatlaf/') || it.name.startsWith(flatLafPath + '/natives/') }
             jar.entries().findAll { it.name.endsWith('.class') }.each { entry ->
                 jar.getInputStream(entry).withCloseable(checkClassVersion)
             }

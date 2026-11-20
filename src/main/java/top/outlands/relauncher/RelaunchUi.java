@@ -4,6 +4,7 @@ import java.awt.BorderLayout;
 import java.awt.Dialog;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.awt.Font;
 import java.awt.Frame;
 import java.awt.GraphicsEnvironment;
 import java.awt.GridBagConstraints;
@@ -35,9 +36,15 @@ import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JToggleButton;
 import javax.swing.KeyStroke;
+import javax.swing.LookAndFeel;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.UIManager;
+import javax.swing.UnsupportedLookAndFeelException;
 import javax.swing.filechooser.FileNameExtensionFilter;
+
+import com.formdev.flatlaf.FlatDarkLaf;
+import com.formdev.flatlaf.FlatSystemProperties;
 
 final class RelaunchUi implements RelaunchOrchestrator.Interaction {
     private static final String TITLE = "Outlands Relauncher";
@@ -78,14 +85,31 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
         AtomicReference<D> openDialog = new AtomicReference<>();
         FutureTask<T> task = new FutureTask<>(() -> {
-            D dialog = create.get();
-            openDialog.set(dialog);
+            LookAndFeel previous = UIManager.getLookAndFeel();
+            String nativeSetting = System.getProperty(FlatSystemProperties.USE_NATIVE_LIBRARY);
             try {
-                dialog.setVisible(true);
-                return result.apply(dialog);
+                System.setProperty(FlatSystemProperties.USE_NATIVE_LIBRARY, "false");
+                if (!FlatDarkLaf.setup()) {
+                    RelaunchOrchestrator.diagnostic("Could not apply the Outlands window theme; using the existing theme.");
+                }
+                D dialog = create.get();
+                openDialog.set(dialog);
+                try {
+                    dialog.setVisible(true);
+                    return result.apply(dialog);
+                } finally {
+                    dialog.dispose();
+                    openDialog.set(null);
+                }
             } finally {
-                dialog.dispose();
-                openDialog.set(null);
+                try {
+                    UIManager.setLookAndFeel(previous);
+                } catch (UnsupportedLookAndFeelException restoreFailure) {
+                    RelaunchOrchestrator.diagnostic("Could not restore the original desktop theme.");
+                } finally {
+                    if (nativeSetting == null) System.clearProperty(FlatSystemProperties.USE_NATIVE_LIBRARY);
+                    else System.setProperty(FlatSystemProperties.USE_NATIVE_LIBRARY, nativeSetting);
+                }
             }
         });
         if (SwingUtilities.isEventDispatchThread()) {
@@ -205,8 +229,14 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
             JPanel body = new JPanel(new BorderLayout(0, 8));
             body.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 8));
-            body.add(new JLabel("Outlands will use this instance's mods and saves. Back up important worlds first."),
-                    BorderLayout.NORTH);
+            JPanel header = new JPanel(new BorderLayout(0, 4));
+            JLabel heading = new JLabel("Outlands launch settings");
+            heading.setFont(heading.getFont().deriveFont(Font.BOLD, heading.getFont().getSize2D() + 5));
+            header.add(heading, BorderLayout.NORTH);
+            header.add(new JLabel("Outlands uses this instance's mods and saves. Back up important worlds first."),
+                    BorderLayout.CENTER);
+            header.setBorder(BorderFactory.createEmptyBorder(0, 0, 8, 0));
+            body.add(header, BorderLayout.NORTH);
             body.add(basics, BorderLayout.CENTER);
             body.add(options, BorderLayout.SOUTH);
             JScrollPane bodyScroll = new JScrollPane(body);
@@ -235,7 +265,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             footer.add(actions, BorderLayout.SOUTH);
 
             JPanel content = new JPanel(new BorderLayout(0, 10));
-            content.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+            content.setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
             content.add(bodyScroll, BorderLayout.CENTER);
             content.add(footer, BorderLayout.SOUTH);
             setContentPane(content);
