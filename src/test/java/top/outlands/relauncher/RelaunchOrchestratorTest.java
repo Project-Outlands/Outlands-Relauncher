@@ -14,6 +14,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -266,9 +267,10 @@ class RelaunchOrchestratorTest {
         Files.createDirectories(config.getParent());
         Files.write(config, ("mode=auto\njavaExecutable=java home/bin/java.exe\nlocalMmcPack=installers/not-outlands.zip\n")
                 .getBytes(StandardCharsets.UTF_8));
+        ui.messages = new RelaunchMessages(Locale.SIMPLIFIED_CHINESE);
         ui.selection = (initial, error, validator) -> {
             assertEquals("installers/not-outlands.zip", initial.localMmcPack);
-            assertTrue(error.contains("not a readable Outlands MMC pack"));
+            assertEquals("所选 ZIP 不是可读取的 Outlands MMC 整合包。请重新选择文件或清空路径。", error);
             return null;
         };
         RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
@@ -458,6 +460,7 @@ class RelaunchOrchestratorTest {
     }
 
     private static final class FakeUi implements RelaunchOrchestrator.Interaction {
+        RelaunchMessages messages = new RelaunchMessages(Locale.ENGLISH);
         boolean configurable = true;
         int configurations;
         Selection selection = (initial, error, validator) -> {
@@ -467,13 +470,13 @@ class RelaunchOrchestratorTest {
         final List<String> fallbacks = new ArrayList<>();
 
         @Override public boolean canConfigure() { return configurable; }
-        @Override public LaunchSettings configure(LaunchSettings initial, String initialError,
+        @Override public LaunchSettings configure(LaunchSettings initial, RelaunchMessages.Message initialError,
                 RelaunchOrchestrator.SettingsValidator validator) throws InterruptedException {
             assertTrue(configurable, "Headless launch must not open settings");
             configurations++;
-            return selection.select(initial, initialError, validator);
+            return selection.select(initial, initialError == null ? null : messages.text(initialError), validator);
         }
-        @Override public void fallback(String reason) { fallbacks.add(reason); }
+        @Override public void fallback(RelaunchMessages.Message reason) { fallbacks.add(messages.text(reason)); }
     }
 
     private static final class FakeProcess extends Process {

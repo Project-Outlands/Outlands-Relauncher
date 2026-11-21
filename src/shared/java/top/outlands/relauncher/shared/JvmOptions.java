@@ -34,13 +34,15 @@ public final class JvmOptions {
         List<String> options = new ArrayList<>();
         appendHeap(options, "Xms", xms, inherited);
         appendHeap(options, "Xmx", xmx, inherited);
-        if (extra.length() > MAX_BYTES) throw new IOException("Extra JVM parameters are too long.");
+        if (extra.length() > MAX_BYTES) throw extraTooLong();
         String[] lines = extra.split("\\r\\n|\\r|\\n", -1);
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i].trim();
             if (line.isEmpty()) continue;
             if (hasControlCharacters(lines[i]) || !isExtra(line)) {
-                throw new IOException("Unsupported JVM parameter on line " + (i + 1) + ". Use one option per line.");
+                int lineNumber = i + 1;
+                throw new ValidationException("error.validation.jvm.unsupportedLine",
+                        "Unsupported JVM parameter on line " + lineNumber + ". Use one option per line.", lineNumber);
             }
             options.add(line);
         }
@@ -50,25 +52,37 @@ public final class JvmOptions {
 
     /** Validates the resolved argument vector again when reading the prepare/launch input file. */
     public static void validate(List<String> options) throws IOException {
-        if (options.size() > MAX_OPTIONS) throw new IOException("Too many JVM parameters (maximum 64).");
+        if (options.size() > MAX_OPTIONS) {
+            throw new ValidationException("error.validation.jvm.tooManyOptions",
+                    "Too many JVM parameters (maximum " + MAX_OPTIONS + ").", MAX_OPTIONS);
+        }
         int bytes = 0;
         Long minimum = null;
         Long maximum = null;
         for (String option : options) {
             bytes += option.getBytes(StandardCharsets.UTF_8).length + 1;
-            if (bytes > MAX_BYTES) throw new IOException("Extra JVM parameters are too long.");
-            if (hasControlCharacters(option)) throw new IOException("A JVM parameter contains a control character.");
+            if (bytes > MAX_BYTES) throw extraTooLong();
+            if (hasControlCharacters(option)) {
+                throw new ValidationException("error.validation.jvm.controlCharacter",
+                        "A JVM parameter contains a control character.");
+            }
             if (option.startsWith("-Xms") && minimum == null) {
                 minimum = heapBytes("Xms", option.substring(4));
             } else if (option.startsWith("-Xmx") && maximum == null) {
                 maximum = heapBytes("Xmx", option.substring(4));
             } else if (!isExtra(option)) {
-                throw new IOException("Unsupported or duplicate JVM parameter.");
+                throw new ValidationException("error.validation.jvm.unsupportedOrDuplicate",
+                        "Unsupported or duplicate JVM parameter.");
             }
         }
         if (minimum != null && maximum != null && minimum > maximum) {
-            throw new IOException("Initial memory (Xms) must not exceed maximum memory (Xmx).");
+            throw new ValidationException("error.validation.jvm.heapOrder",
+                    "Initial memory (Xms) must not exceed maximum memory (Xmx).");
         }
+    }
+
+    private static ValidationException extraTooLong() {
+        return new ValidationException("error.validation.jvm.extraTooLong", "Extra JVM parameters are too long.");
     }
 
     private static void appendHeap(List<String> options, String name, String value, List<String> inherited) throws IOException {
@@ -95,10 +109,12 @@ public final class JvmOptions {
                 int unit = match.group(2).isEmpty() ? 0 : "kmgt".indexOf(Character.toLowerCase(match.group(2).charAt(0))) + 1;
                 if (amount > 0) return Math.multiplyExact(amount, 1L << (unit * 10));
             } catch (ArithmeticException | NumberFormatException overflow) {
-                throw new IOException(name + " exceeds the supported memory range.", overflow);
+                throw new ValidationException("error.validation.jvm.heapOverflow",
+                        name + " exceeds the supported memory range.", overflow, name);
             }
         }
-        throw new IOException(name + " must be a positive size, such as 512m or 4g.");
+        throw new ValidationException("error.validation.jvm.heapInvalidSize",
+                name + " must be a positive size, such as 512m or 4g.", name);
     }
 
     private static boolean hasControlCharacters(String value) {

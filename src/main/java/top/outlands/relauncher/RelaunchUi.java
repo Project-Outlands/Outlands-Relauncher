@@ -50,32 +50,37 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 import com.formdev.flatlaf.FlatDarkLaf;
 import com.formdev.flatlaf.FlatSystemProperties;
 
+import top.outlands.relauncher.RelaunchMessages.Message;
 import top.outlands.relauncher.shared.PackSettings;
 
 final class RelaunchUi implements RelaunchOrchestrator.Interaction {
-    private static final String TITLE = "Outlands Relauncher";
-
     @Override
     public boolean canConfigure() {
         return !GraphicsEnvironment.isHeadless();
     }
 
     @Override
-    public LaunchSettings configure(LaunchSettings initial, String initialError,
+    public LaunchSettings configure(LaunchSettings initial, Message initialError,
             RelaunchOrchestrator.SettingsValidator validator) throws InterruptedException {
         if (!canConfigure()) {
             return null;
         }
-        return showModal(() -> new SettingsDialog(initial, initialError, validator), dialog -> dialog.result);
+        RelaunchMessages messages = RelaunchMessages.display();
+        return showModal(() -> new SettingsDialog(messages, initial, initialError, validator), dialog -> dialog.result);
     }
 
     @Override
-    public void fallback(String reason) {
-        RelaunchOrchestrator.diagnostic(reason + " Continuing with Forge.");
+    public void fallback(Message reason) {
+        RelaunchMessages english = new RelaunchMessages(Locale.ENGLISH);
+        RelaunchOrchestrator.diagnostic(english.text(reason) + " " + english.text("fallback.continue"));
         if (!Thread.currentThread().isInterrupted() && canConfigure()) {
             try {
-                showModal(() -> new JOptionPane(reason + "\nContinuing with Forge.", JOptionPane.WARNING_MESSAGE)
-                        .createDialog(null, TITLE), dialog -> null);
+                RelaunchMessages messages = RelaunchMessages.display();
+                String ok = messages.text("button.ok");
+                showModal(() -> new JOptionPane(messages.text(reason) + "\n" + messages.text("fallback.continue"),
+                        JOptionPane.WARNING_MESSAGE, JOptionPane.DEFAULT_OPTION, null,
+                        new Object[] {ok}, ok).createDialog(null, messages.text("fallback.title")),
+                        dialog -> null);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             } catch (RuntimeException unavailable) {
@@ -142,8 +147,18 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
     }
 
+    static JFileChooser createChooser(RelaunchMessages messages) {
+        JFileChooser chooser = new JFileChooser();
+        if (!chooser.getLocale().equals(messages.locale())) {
+            chooser.setLocale(messages.locale());
+            chooser.updateUI();
+        }
+        return chooser;
+    }
+
     @SuppressWarnings("serial")
     private static final class SettingsDialog extends JDialog {
+        private final RelaunchMessages messages;
         private final JTextField javaPath = field("javaExecutable", 28);
         private final JTextField localPackage = field("localOutlandsPackage", 28);
         private final JTextField releaseVersion = field("releaseVersion", 28);
@@ -154,20 +169,30 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final JTextField xmx = field("xmx", 12);
         private final JTextArea jvmArgs = new JTextArea(5, 28);
         private final JTextArea status = new JTextArea(2, 34);
-        private final JCheckBox automatic = new JCheckBox("Automatically launch Outlands next time");
-        private final JButton launch = new JButton("Launch Outlands");
-        private final JButton forge = new JButton("Continue Forge");
-        private final JToggleButton advancedToggle = new JToggleButton("Show advanced settings");
-        private final JButton browseJava = new JButton("Browse...");
-        private final JButton browsePackage = new JButton("Browse...");
-        private final JButton browseLibraries = new JButton("Browse...");
-        private final JButton clearLibraries = new JButton("Clear");
+        private final JCheckBox automatic;
+        private final JButton launch;
+        private final JButton forge;
+        private final JToggleButton advancedToggle;
+        private final JButton browseJava;
+        private final JButton browsePackage;
+        private final JButton browseLibraries;
+        private final JButton clearLibraries;
         private final RelaunchOrchestrator.SettingsValidator validator;
         private SwingWorker<Void, Void> validation;
         private LaunchSettings result;
 
-        SettingsDialog(LaunchSettings initial, String initialError, RelaunchOrchestrator.SettingsValidator validator) {
-            super((Frame) null, "Outlands Launch Settings", Dialog.ModalityType.APPLICATION_MODAL);
+        SettingsDialog(RelaunchMessages messages, LaunchSettings initial, Message initialError,
+                       RelaunchOrchestrator.SettingsValidator validator) {
+            super((Frame) null, messages.text("settings.title"), Dialog.ModalityType.APPLICATION_MODAL);
+            this.messages = messages;
+            automatic = new JCheckBox(messages.text("settings.automatic"));
+            launch = new JButton(messages.text("button.launch"));
+            forge = new JButton(messages.text("button.continue"));
+            advancedToggle = new JToggleButton(messages.text("advanced.show"));
+            browseJava = new JButton(messages.text("button.browse"));
+            browsePackage = new JButton(messages.text("button.browse"));
+            browseLibraries = new JButton(messages.text("button.browse"));
+            clearLibraries = new JButton(messages.text("button.clear"));
             this.validator = validator;
             setName("outlandsLaunchSettings");
             setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
@@ -198,49 +223,49 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             automatic.setMnemonic(KeyEvent.VK_T);
 
             JPanel basics = new JPanel(new GridBagLayout());
-            addRow(basics, 0, label("Java 25 x64:", KeyEvent.VK_J, javaPath), javaPath, browseJava);
-            addRow(basics, 1, label("Initial heap (Xms):", KeyEvent.VK_I, xms), xms, null);
-            addRow(basics, 2, label("Maximum heap (Xmx):", KeyEvent.VK_M, xmx), xmx, null);
-            addNote(basics, 3, "Heap example: 2G. Leave blank to use Forge's setting or the JVM default.");
-            browseJava.getAccessibleContext().setAccessibleName("Browse for Java executable");
-            browseJava.addActionListener(event -> browse(javaPath, "Select Java 25 x64 (java.exe)",
-                    "Java executable (*.exe)", "exe"));
+            addRow(basics, 0, label(messages.text("field.java"), KeyEvent.VK_J, javaPath), javaPath, browseJava);
+            addRow(basics, 1, label(messages.text("field.xms"), KeyEvent.VK_I, xms), xms, null);
+            addRow(basics, 2, label(messages.text("field.xmx"), KeyEvent.VK_M, xmx), xmx, null);
+            addNote(basics, 3, messages.text("help.heap"));
+            browseJava.getAccessibleContext().setAccessibleName(messages.text("access.java"));
+            browseJava.addActionListener(event -> browse(javaPath, messages.text("chooser.java.title"),
+                    messages.text("chooser.java.filter"), "exe"));
 
             JPanel advanced = new JPanel(new GridBagLayout());
-            addRow(advanced, 0, label("Local Outlands package:", KeyEvent.VK_P, localPackage), localPackage,
+            addRow(advanced, 0, label(messages.text("field.package"), KeyEvent.VK_P, localPackage), localPackage,
                     browsePackage);
-            addNote(advanced, 1, "MMC pack (.zip) or installer (.jar). Leave blank to use a release.");
-            addRow(advanced, 2, label("Release version:", KeyEvent.VK_R, releaseVersion), releaseVersion, null);
-            addNote(advanced, 3, "Leave blank for the pinned release (" + PackSettings.DEFAULT_VERSION + ").");
-            addRow(advanced, 4, label("Proxy URL:", KeyEvent.VK_U, proxy), proxy, null);
-            addNote(advanced, 5, "Optional HTTP or SOCKS URL with host and port, no authentication.");
-            addRow(advanced, 6, label("Maven Central mirror:", KeyEvent.VK_V, mavenMirror), mavenMirror, null);
-            addNote(advanced, 7, "Optional HTTPS mirror URL. Leave blank to use Maven Central.");
+            addNote(advanced, 1, messages.text("help.package"));
+            addRow(advanced, 2, label(messages.text("field.release"), KeyEvent.VK_R, releaseVersion), releaseVersion, null);
+            addNote(advanced, 3, messages.text("help.release", PackSettings.DEFAULT_VERSION));
+            addRow(advanced, 4, label(messages.text("field.proxy"), KeyEvent.VK_U, proxy), proxy, null);
+            addNote(advanced, 5, messages.text("help.proxy"));
+            addRow(advanced, 6, label(messages.text("field.mirror"), KeyEvent.VK_V, mavenMirror), mavenMirror, null);
+            addNote(advanced, 7, messages.text("help.mirror"));
             JPanel libraryButtons = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
             libraryButtons.add(browseLibraries);
             libraryButtons.add(clearLibraries);
-            addRow(advanced, 8, label("Libraries directory:", KeyEvent.VK_D, librariesDirectory), librariesDirectory,
+            addRow(advanced, 8, label(messages.text("field.libraries"), KeyEvent.VK_D, librariesDirectory), librariesDirectory,
                     libraryButtons);
-            addNote(advanced, 9, "Optional read-only Maven libraries; missing files use the private cache.");
-            addRow(advanced, 10, label("Extra JVM options:", KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
-            addNote(advanced, 11, "Enter one complete JVM option per line, without shell quoting.");
+            addNote(advanced, 9, messages.text("help.libraries"));
+            addRow(advanced, 10, label(messages.text("field.options"), KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
+            addNote(advanced, 11, messages.text("help.options"));
             // Keep keyboard tab traversal consistent with the other input fields.
             jvmArgs.setFocusTraversalKeysEnabled(true);
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.FORWARD_TRAVERSAL_KEYS,
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0)));
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS,
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, KeyEvent.SHIFT_DOWN_MASK)));
-            browsePackage.getAccessibleContext().setAccessibleName("Browse for a local Outlands package");
-            browsePackage.addActionListener(event -> browse(localPackage, "Select a local Outlands package",
-                    "Outlands packages (*.zip, *.jar)", "zip", "jar"));
-            browseLibraries.getAccessibleContext().setAccessibleName("Browse for a libraries directory");
+            browsePackage.getAccessibleContext().setAccessibleName(messages.text("access.package"));
+            browsePackage.addActionListener(event -> browse(localPackage, messages.text("chooser.package.title"),
+                    messages.text("chooser.package.filter"), "zip", "jar"));
+            browseLibraries.getAccessibleContext().setAccessibleName(messages.text("access.libraries.browse"));
             browseLibraries.addActionListener(event -> {
-                JFileChooser chooser = new JFileChooser();
-                chooser.setDialogTitle("Select a libraries directory");
+                JFileChooser chooser = createChooser(messages);
+                chooser.setDialogTitle(messages.text("chooser.libraries.title"));
                 chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
                 choosePath(librariesDirectory, chooser);
             });
-            clearLibraries.getAccessibleContext().setAccessibleName("Use the default libraries directory");
+            clearLibraries.getAccessibleContext().setAccessibleName(messages.text("access.libraries.clear"));
             clearLibraries.addActionListener(event -> librariesDirectory.setText(""));
 
             JPanel toggle = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
@@ -253,7 +278,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             advanced.setVisible(false);
             advancedToggle.addActionListener(event -> {
                 boolean expanded = advancedToggle.isSelected();
-                advancedToggle.setText(expanded ? "Hide advanced settings" : "Show advanced settings");
+                advancedToggle.setText(messages.text(expanded ? "advanced.hide" : "advanced.show"));
                 advanced.setVisible(expanded);
                 options.revalidate();
                 options.repaint();
@@ -272,10 +297,10 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             JPanel body = new JPanel(new BorderLayout(0, 8));
             body.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 8));
             JPanel header = new JPanel(new BorderLayout(0, 4));
-            JLabel heading = new JLabel("Outlands launch settings");
+            JLabel heading = new JLabel(messages.text("settings.heading"));
             heading.setFont(heading.getFont().deriveFont(Font.BOLD, heading.getFont().getSize2D() + 5));
             header.add(heading, BorderLayout.NORTH);
-            header.add(new JLabel("Outlands uses this instance's mods and saves. Back up important worlds first."),
+            header.add(new JLabel(messages.text("settings.warning")),
                     BorderLayout.CENTER);
             header.setBorder(BorderFactory.createEmptyBorder(0, 0, 8, 0));
             body.add(header, BorderLayout.NORTH);
@@ -286,11 +311,11 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             bodyScroll.getVerticalScrollBar().setUnitIncrement(16);
 
             status.setName("validationStatus");
-            status.getAccessibleContext().setAccessibleName("Settings validation status");
+            status.getAccessibleContext().setAccessibleName(messages.text("access.validation"));
             status.setEditable(false);
             status.setLineWrap(true);
             status.setWrapStyleWord(true);
-            showStatus(initialError);
+            showStatus(initialError == null ? "" : messages.text(initialError));
 
             launch.setName("launchOutlands");
             launch.setMnemonic(KeyEvent.VK_L);
@@ -328,7 +353,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
 
         private void browse(JTextField field, String title, String description, String... extensions) {
-            JFileChooser chooser = new JFileChooser();
+            JFileChooser chooser = createChooser(messages);
             chooser.setDialogTitle(title);
             chooser.setFileFilter(new FileNameExtensionFilter(description, extensions));
             choosePath(field, chooser);
@@ -355,7 +380,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     releaseVersion.getText().trim(), proxy.getText().trim(), mavenMirror.getText().trim(),
                     librariesDirectory.getText());
             setEditing(false);
-            showStatus("Checking launch settings...");
+            showStatus(messages.text("validation.checking"));
             validation = new SwingWorker<Void, Void>() {
                 @Override
                 protected Void doInBackground() throws IOException, InterruptedException {
@@ -375,18 +400,10 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                         dispose();
                         return;
                     } catch (ExecutionException failure) {
-                        Throwable cause = failure.getCause();
-                        if (cause instanceof IOException && cause.getMessage() != null
-                                && !cause.getMessage().trim().isEmpty()) {
-                            showStatus(cause.getMessage());
-                        } else if (cause instanceof InterruptedException) {
-                            showStatus("Settings validation was interrupted. Try again.");
-                        } else {
-                            showStatus("Could not check the launch settings. Check the inputs and try again.");
-                        }
+                        showStatus(messages.text(RelaunchMessages.validation(failure.getCause())));
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
-                        showStatus("Settings validation was interrupted. Try again.");
+                        showStatus(messages.text("validation.interrupted"));
                     }
                     setEditing(true);
                 }
@@ -403,7 +420,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
 
         private void showStatus(String message) {
-            status.setText(message == null ? "" : message);
+            status.setText(message);
             status.setCaretPosition(0);
         }
 

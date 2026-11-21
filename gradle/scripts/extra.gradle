@@ -114,6 +114,16 @@ def verifyRelaunchJar = tasks.register('verifyRelaunchJar') {
             assert jar.getJarEntry('META-INF/outlands-relauncher/gson.jar') != null
             assert jar.getJarEntry(flatLafPath + '/FlatDarkLaf.class') != null
             assert jar.getJarEntry('META-INF/LICENSE') != null
+            def messageBundles = ['Messages.properties', 'Messages_zh_Hans.properties'].collect { fileName ->
+                def entry = jar.getJarEntry('top/outlands/relauncher/i18n/' + fileName)
+                assert entry != null
+                def messages = new Properties()
+                jar.getInputStream(entry).withReader('UTF-8') { messages.load(it) }
+                assert messages.values().every { !it.trim().isEmpty() }
+                messages
+            }
+            assert !messageBundles[0].isEmpty()
+            assert messageBundles[0].keySet() == messageBundles[1].keySet()
             def uiDefaults = jar.getJarEntry(flatLafPath + '/FlatLaf.properties')
             assert uiDefaults != null
             jar.getInputStream(uiDefaults).withCloseable { stream ->
