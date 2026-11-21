@@ -1,5 +1,8 @@
 package top.outlands.relauncher.bootstrap;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -15,6 +18,8 @@ import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+
+import top.outlands.relauncher.shared.LaunchPlatform;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -93,7 +98,81 @@ class MmcMetadataTest {
         assertThrows(IOException.class, () -> read("", loader));
     }
 
+    @Test
+    void resolvesLinuxAndMacNativesAndOrderedArmRules() throws IOException {
+        Map<String, String> files = fixture(false);
+        JsonObject lwjgl = JsonParser.parseString(files.get("patches/org.lwjgl3.json")).getAsJsonObject();
+        JsonArray lwjglLibraries = lwjgl.getAsJsonArray("libraries");
+        addLwjgl(lwjglLibraries, "linux-arm64", "linux-arm64");
+        addLwjgl(lwjglLibraries, "macos", "osx");
+        addLwjgl(lwjglLibraries, "macos-arm64", "osx-arm64");
+        files.put("patches/org.lwjgl3.json", lwjgl.toString());
+
+        JsonObject minecraft = JsonParser.parseString(files.get(MC_PATCH)).getAsJsonObject();
+        JsonObject voice = minecraft.getAsJsonArray("libraries").get(1).getAsJsonObject();
+        voice.add("rules", JsonParser.parseString("[{\"action\":\"allow\"},{\"action\":\"disallow\",\"os\":{\"name\":\"osx-arm64\"}}]"));
+        JsonObject mappings = voice.getAsJsonObject("natives");
+        mappings.addProperty("linux", "natives-linux");
+        mappings.addProperty("linux-arm64", "natives-linux-arm64-${arch}");
+        mappings.addProperty("osx", "natives-osx");
+        JsonObject classifiers = voice.getAsJsonObject("downloads").getAsJsonObject("classifiers");
+        for (String classifier : Arrays.asList("natives-linux", "natives-linux-arm64-64", "natives-osx")) {
+            classifiers.add(classifier, JsonParser.parseString(ARTIFACT));
+        }
+        files.put(MC_PATCH, minecraft.toString());
+
+        assertNativeSelection(files, "Linux", "x86_64", "linux", "linux");
+        assertNativeSelection(files, "Linux", "aarch64", "linux-arm64", "linux-arm64-64");
+        assertNativeSelection(files, "Mac OS X", "amd64", "macos", "osx");
+        assertNativeSelection(files, "Mac OS X", "arm64", "macos-arm64", null);
+    }
+
+    @Test
+    void rejectsOlderPackWithoutMatchingLwjglCoreNative() {
+        LaunchPlatform platform = LaunchPlatform.detect("Linux", "arm64", "6.12");
+        IOException failure = assertThrows(IOException.class, () -> read("", fixture(false), platform, 25));
+        assertTrue(failure.getMessage().contains("no LWJGL core natives for linux/arm64"));
+    }
+
+    @Test
+    void compatibleJavaMajorAtOrAbove25EstablishesTheMinimum() throws IOException {
+        Map<String, String> files = fixture(false);
+        LaunchPlatform platform = LaunchPlatform.detect("Linux", "amd64", "6.12");
+        assertEquals("1.12.2-Outlands-" + OUTLANDS, read("", files, platform, 26).id);
+        files.compute(MC_PATCH, (name, json) -> json.replace("[25,26]", "[25]"));
+        assertEquals("1.12.2-Outlands-" + OUTLANDS, read("", files, platform, 27).id);
+        files.compute(MC_PATCH, (name, json) -> json.replace("[25]", "[26]"));
+        assertEquals("1.12.2-Outlands-" + OUTLANDS, read("", files, platform, 26).id);
+        assertThrows(IOException.class, () -> read("", files, platform, 25));
+        files.compute(MC_PATCH, (name, json) -> json.replace("[26]", "[26,25.5]"));
+        assertThrows(IOException.class, () -> read("", files, platform, 26));
+    }
+
+    private static void addLwjgl(JsonArray libraries, String classifier, String ruleOs) {
+        libraries.add(JsonParser.parseString("{\"name\":\"org.lwjgl:lwjgl:3.4.3:natives-" + classifier + "\","
+                + "\"rules\":[{\"action\":\"allow\",\"os\":{\"name\":\"" + ruleOs + "\"}}],"
+                + "\"downloads\":{\"artifact\":" + ARTIFACT + "}}"));
+    }
+
+    private void assertNativeSelection(Map<String, String> files, String os, String arch, String lwjgl, String mapped)
+            throws IOException {
+        LaunchPlatform platform = LaunchPlatform.detect(os, arch, "14.3");
+        InstallerMetadata metadata = read("", files, platform, 25);
+        assertEquals(Collections.singletonList("org/lwjgl/lwjgl/3.4.3/lwjgl-3.4.3-natives-" + lwjgl + ".jar"),
+                metadata.classpath.stream().map(artifact -> artifact.path).filter(path -> path.startsWith("org/lwjgl/"))
+                        .collect(Collectors.toList()));
+        assertEquals(mapped == null ? Collections.emptyList() : Collections.singletonList("org/example/voice/1/voice-1-natives-" + mapped + ".jar"),
+                metadata.natives.stream().map(artifact -> artifact.path).collect(Collectors.toList()));
+        assertEquals(platform.mac() ? Arrays.asList("-XstartOnFirstThread", "-Dfile.encoding=UTF-8")
+                : Collections.singletonList("-Dfile.encoding=UTF-8"), metadata.jvm);
+    }
+
     private InstallerMetadata read(String prefix, Map<String, String> files) throws IOException {
+        return read(prefix, files, LaunchPlatform.detect("Windows 11", "amd64", "10.0"), 25);
+    }
+
+    private InstallerMetadata read(String prefix, Map<String, String> files, LaunchPlatform platform, int javaMajor)
+            throws IOException {
         Path path = Files.createTempFile(directory, "instance", ".zip");
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(path))) {
             for (Map.Entry<String, String> file : files.entrySet()) {
@@ -103,7 +182,7 @@ class MmcMetadataTest {
             }
         }
         try (ZipFile zip = new ZipFile(path.toFile())) {
-            return MmcMetadata.read(zip, "10.0");
+            return MmcMetadata.read(zip, platform, javaMajor);
         }
     }
 

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -23,12 +24,15 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import java.util.zip.ZipFile;
 
 import top.outlands.relauncher.shared.JavaArgFile;
 import top.outlands.relauncher.shared.JvmOptions;
+import top.outlands.relauncher.shared.LaunchPlatform;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -127,7 +131,7 @@ class PrepareMainTest {
         String[] args = {root.resolve("cache").toString(), run.toString(), archive.toString(),
                 bootstrap.toString(), "--install"};
         assertThrows(PrepareMain.InvalidLocalPack.class,
-                () -> PrepareMain.prepare(args, uri -> { throw new AssertionError("Invalid archive must not fetch dependencies"); }, null));
+                () -> PrepareMain.prepare(args, uri -> { throw new AssertionError("Invalid archive must not fetch dependencies"); }, null, 25));
         assertFalse(Files.exists(run.resolve("java.args")));
         assertEquals("verify 0 0\n", readProgress(run));
     }
@@ -183,7 +187,7 @@ class PrepareMainTest {
         String[] args = {fixture.cache.toString(), run.toString(), fixture.installer.toString(),
                 fixture.bootstrap.toString(), "--install"};
         assertThrows(IOException.class, () -> PrepareMain.prepare(args,
-                uri -> { throw new AssertionError("Progress write failure must abort preparation"); }, fixture.release));
+                uri -> { throw new AssertionError("Progress write failure must abort preparation"); }, fixture.release, 25));
         assertFalse(Files.exists(run.resolve("launch.properties")));
     }
 
@@ -198,6 +202,65 @@ class PrepareMainTest {
         assertEquals(3, fixture.requests);
         assertFalse(Files.exists(fixture.run.resolve("install-progress")));
         fixture.assertOutput(Arrays.asList("--username", "${auth_player_name}", "--label", "quoted value", ""));
+    }
+
+    @Test
+    void installerFiltersConditionalArgumentsAndNativesForTargetPlatforms() throws IOException {
+        Fixture fixture = fixture(true, "hello.dll", version -> {
+            JsonObject args = version.getAsJsonObject("arguments");
+            JsonObject platformArg = ruleArg("osx-arm64", "--apple-silicon");
+            JsonObject os = platformArg.getAsJsonArray("rules").get(0).getAsJsonObject().getAsJsonObject("os");
+            os.addProperty("arch", "aarch64|arm64");
+            os.addProperty("version", "14[.].*");
+            args.getAsJsonArray("game").add(platformArg);
+            JsonArray libs = version.getAsJsonArray("libraries");
+            // Replace host-specific fixture libraries, retaining the embedded loader.
+            while (libs.size() > 1) libs.remove(1);
+            for (String classifier : Arrays.asList("linux", "linux-arm64", "macos", "macos-arm64", "windows", "windows-arm64")) {
+                libs.add(library("org.lwjgl:lwjgl:3.4.3:natives-" + classifier, null,
+                        artifact("manifest/" + classifier + ".jar", "lwjgl", LWJGL)));
+            }
+        });
+        try (ZipFile zip = new ZipFile(fixture.installer.toFile())) {
+            for (String os : Arrays.asList("Windows 11", "Linux", "Mac OS X")) {
+                for (String arch : Arrays.asList("amd64", "aarch64")) {
+                    LaunchPlatform platform = LaunchPlatform.detect(os, arch, "14.3");
+                    InstallerMetadata metadata = InstallerMetadata.read(zip, platform, 25);
+                    boolean arm = "aarch64".equals(arch);
+                    String classifier = (platform.mac() ? "macos" : platform.os()) + (arm ? "-arm64" : "");
+                    assertEquals(3, metadata.classpath.size());
+                    assertEquals("manifest/" + classifier + ".jar", metadata.classpath.get(1).path);
+                    assertEquals(platform.mac(), metadata.jvm.contains("-XstartOnFirstThread"));
+                    assertEquals(platform.mac() && arm, metadata.game.contains("--apple-silicon"));
+                }
+            }
+            LaunchPlatform oldMac = LaunchPlatform.detect("Mac OS X", "arm64", "13.6");
+            assertFalse(InstallerMetadata.read(zip, oldMac, 25).game.contains("--apple-silicon"));
+        }
+    }
+
+    @Test
+    void installerJavaMajorIsAMinimumNotAnExactVersion() throws IOException {
+        Fixture fixture = fixture(true, "hello.dll", version ->
+                version.getAsJsonObject("javaVersion").addProperty("majorVersion", 26));
+        try (ZipFile zip = new ZipFile(fixture.installer.toFile())) {
+            assertThrows(IOException.class, () -> InstallerMetadata.read(zip, LaunchPlatform.current(), 25));
+            assertEquals(ID, InstallerMetadata.read(zip, LaunchPlatform.current(), 26).id);
+            assertEquals(ID, InstallerMetadata.read(zip, LaunchPlatform.current(), 27).id);
+        }
+    }
+
+    @Test
+    void classpathRejectsTheTargetPlatformSeparatorOnly() throws IOException {
+        LaunchPlatform windows = LaunchPlatform.detect("Windows 11", "x86_64", "10.0");
+        LaunchPlatform linux = LaunchPlatform.detect("Linux", "arm64", "6.12");
+        Path semicolon = root.resolve("with;semicolon.jar");
+        assertThrows(IOException.class, () -> PrepareMain.classpathEntry(semicolon, windows));
+        // Relative path works on either host and does not contain a Windows drive separator.
+        assertEquals("with;semicolon.jar", PrepareMain.classpathEntry(semicolon.getFileName(), linux));
+        if (File.pathSeparatorChar == ':') {
+            assertThrows(IOException.class, () -> PrepareMain.classpathEntry(root.resolve("with:colon.jar"), linux));
+        }
     }
 
     @Test
@@ -350,7 +413,7 @@ class PrepareMainTest {
             args.add("jvm", jvm);
             JsonArray game = strings("--username", "${auth_player_name}");
             game.add(ruleArg("windows-x86", "--wrong-arch"));
-            JsonObject conditional = ruleArg("windows", "unused");
+            JsonObject conditional = ruleArg(LaunchPlatform.current().os(), "unused");
             conditional.add("value", strings("--demo-false", "a value"));
             game.add(conditional);
             args.add("game", game);
@@ -361,16 +424,21 @@ class PrepareMainTest {
         version.add("downloads", downloads);
         JsonArray libraries = new JsonArray();
         libraries.add(library(InstallerMetadata.LOADER_GROUP + "fixture", null, artifact(LOADER_PATH, "loader", LOADER)));
-        libraries.add(library("org.lwjgl:lwjgl:3.4.3:natives-windows", "windows", artifact("manifest/lwjgl.jar", "lwjgl", LWJGL)));
-        libraries.add(library("org.lwjgl:lwjgl:3.4.3:natives-windows-arm64", "windows", null));
-        libraries.add(library("org.lwjgl:lwjgl:3.4.3:natives-windows-x86", "windows", null));
-        libraries.add(library("test:other:1", "osx", null));
+        LaunchPlatform platform = LaunchPlatform.current();
+        String os = platform.os();
+        String nativeOs = platform.mac() ? "macos" : os;
+        String classifier = "natives-" + nativeOs + ("arm64".equals(platform.arch()) ? "-arm64" : "");
+        libraries.add(library("org.lwjgl:lwjgl:3.4.3:" + classifier, os, artifact("manifest/lwjgl.jar", "lwjgl", LWJGL)));
+        String wrongArch = "arm64".equals(platform.arch()) ? "" : "-arm64";
+        libraries.add(library("org.lwjgl:lwjgl:3.4.3:natives-" + nativeOs + wrongArch, os, null));
+        libraries.add(library("org.lwjgl:lwjgl:3.4.3:natives-" + nativeOs + "-x86", os, null));
+        libraries.add(library("test:other:1", platform.windows() ? "osx" : "windows", null));
         JsonObject nativeLib = library("test:legacy-natives:1", null, null);
         JsonObject natives = new JsonObject();
-        natives.addProperty("windows", "natives-windows-${arch}");
+        natives.addProperty(os, "natives-" + nativeOs + "-${arch}");
         nativeLib.add("natives", natives);
         JsonObject classifiers = new JsonObject();
-        classifiers.add("natives-windows-64", artifact("manifest/legacy-natives.jar", "natives", nativeBytes));
+        classifiers.add("natives-" + nativeOs + "-64", artifact("manifest/legacy-natives.jar", "natives", nativeBytes));
         nativeLib.getAsJsonObject("downloads").add("classifiers", classifiers);
         JsonObject extract = new JsonObject();
         extract.add("exclude", strings("ignored.txt"));
@@ -494,7 +562,7 @@ class PrepareMainTest {
                 byte[] bytes = artifacts.get(uri);
                 if (bytes == null) throw new AssertionError("Unexpected download: " + uri);
                 return new ByteArrayInputStream(bytes);
-            }, release);
+            }, release, 25);
         }
 
         void assertOutput(List<String> tokens) throws IOException {
@@ -507,6 +575,7 @@ class PrepareMainTest {
             assertEquals(tokens.size() + 2, properties.size());
             for (int i = 0; i < tokens.size(); i++) assertEquals(tokens.get(i), properties.getProperty("game." + i));
             List<String> args = Files.readAllLines(run.resolve("java.args"), JavaArgFile.launcherCharset());
+            if (LaunchPlatform.current().mac()) assertEquals("\"-XstartOnFirstThread\"", args.remove(0));
             assertEquals("\"-Xms512m\"", args.get(0));
             assertEquals("\"-Xmx4G\"", args.get(1));
             assertEquals("\"-Dcustom=two words\"", args.get(2));
@@ -514,7 +583,7 @@ class PrepareMainTest {
             assertTrue(args.get(4).startsWith("\"-Djava.library.path="));
             assertTrue(args.get(4).endsWith("natives\""));
             assertEquals("\"-cp\"", args.get(5));
-            String[] paths = args.get(6).substring(1, args.get(6).length() - 1).replace("\\\\", "\\").split(";");
+            String[] paths = args.get(6).substring(1, args.get(6).length() - 1).replace("\\\\", "\\").split(Pattern.quote(File.pathSeparator));
             assertEquals(4, paths.length);
             assertTrue(paths[0].endsWith(LOADER_PATH.replace('/', java.io.File.separatorChar)));
             assertTrue(paths[1].endsWith("lwjgl.jar"));

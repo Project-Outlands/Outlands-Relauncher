@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -114,7 +115,7 @@ class RelaunchOrchestratorTest {
                         StandardCharsets.UTF_8));
                 currentRun[0] = prepare(command);
                 assertEquals(currentRun[0].resolve("bootstrap.jar").toString(), command.get(7));
-                assertEquals(currentRun[0].resolve("bootstrap.jar") + ";" + currentRun[0].resolve("gson.jar"), command.get(2));
+                assertEquals(currentRun[0].resolve("bootstrap.jar") + File.pathSeparator + currentRun[0].resolve("gson.jar"), command.get(2));
                 return new FakeProcess(0, events, false);
             }
             events.add("game");
@@ -676,7 +677,7 @@ class RelaunchOrchestratorTest {
         Path bootstrap = run.resolve("bootstrap.jar");
         Path gson = run.resolve("gson.jar");
         List<String> command = RelaunchOrchestrator.prepareCommand(java, instance, cache, run, bootstrap, gson, null).command();
-        assertEquals(Arrays.asList(java.toString(), "-cp", bootstrap + ";" + gson,
+        assertEquals(Arrays.asList(java.toString(), "-cp", bootstrap + File.pathSeparator + gson,
                 "top.outlands.relauncher.bootstrap.PrepareMain", cache.toString(), run.toString(),
                 "", bootstrap.toString()), command);
     }

@@ -18,6 +18,7 @@ import java.util.zip.ZipFile;
 
 import top.outlands.relauncher.shared.JavaArgFile;
 import top.outlands.relauncher.shared.JvmOptions;
+import top.outlands.relauncher.shared.LaunchPlatform;
 import top.outlands.relauncher.shared.PackSettings;
 import top.outlands.relauncher.shared.ReleaseCatalog;
 
@@ -36,11 +37,8 @@ public final class PrepareMain {
     public static void main(String[] args) {
         try {
             boolean install = installMode(args);
-            String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-            require(System.getProperty("os.name", "").startsWith("Windows")
-                    && ("amd64".equals(arch) || "x86_64".equals(arch))
-                    && Integer.parseInt(System.getProperty("java.specification.version", "0")) >= 25,
-                    "Preparation requires Windows x64 and Java 25 or newer");
+            LaunchPlatform platform = currentPlatform();
+            int javaMajor = currentJavaMajor();
             ParentPipe.watch(System.in);
             Path progress = startInstallProgress(args[1], install);
             Properties settings = readPackOptions(Paths.get(args[1]));
@@ -54,7 +52,7 @@ public final class PrepareMain {
                     release = customRelease(cache, options::download, version);
                 }
             }
-            prepare(args, options::download, release, options, progress);
+            prepare(args, options::download, release, options, progress, platform, javaMajor);
         } catch (IOException | RuntimeException ex) {
             System.err.println("Outlands preparation failed: " + ex.getMessage());
             System.exit(ex instanceof InvalidLocalPack ? PackSettings.INVALID_LOCAL_PACK_EXIT : 1);
@@ -75,14 +73,16 @@ public final class PrepareMain {
         return progress;
     }
 
-    static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release)
-            throws IOException {
+    static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release,
+                        int javaMajor) throws IOException {
         boolean install = installMode(args);
-        prepare(args, downloader, release, DownloadOptions.DEFAULT, startInstallProgress(args[1], install));
+        prepare(args, downloader, release, DownloadOptions.DEFAULT, startInstallProgress(args[1], install),
+                currentPlatform(), javaMajor);
     }
 
     private static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release,
-                                DownloadOptions options, Path progress) throws IOException {
+                                DownloadOptions options, Path progress, LaunchPlatform platform, int javaMajor)
+            throws IOException {
         Path runDir = Paths.get(args[1]).toRealPath();
         require(Files.isDirectory(runDir), "Run directory must already exist");
         Path argFile = runDir.resolve("java.args");
@@ -101,8 +101,7 @@ public final class PrepareMain {
         boolean readingLocalMetadata = local;
         try (ZipFile zip = new ZipFile((local ? absoluteFile(args[2], "Local Outlands package")
                 : cache.obtain(release, null)).toFile())) {
-            String osVersion = System.getProperty("os.version", "");
-            metadata = mmc ? MmcMetadata.read(zip, osVersion) : InstallerMetadata.read(zip, osVersion);
+            metadata = mmc ? MmcMetadata.read(zip, platform, javaMajor) : InstallerMetadata.read(zip, platform, javaMajor);
             readingLocalMetadata = false;
             if (mmc && !local) {
                 require(release.path.equals(releasePath(metadata.id.substring("1.12.2-Outlands-".length()))),
@@ -115,7 +114,7 @@ public final class PrepareMain {
             for (InstallerMetadata.Artifact artifact : metadata.classpath) {
                 VerifiedCache.Source embedded = artifact.embeddedPath == null
                         ? null : () -> zip.getInputStream(zip.getEntry(artifact.embeddedPath));
-                classpath.add(classpathEntry(cache.obtain(artifact, embedded)));
+                classpath.add(classpathEntry(cache.obtain(artifact, embedded), platform));
                 writeProgress(progress, "dependencies", ++done, total);
             }
             NativeExtractor extractor = new NativeExtractor(natives);
@@ -128,13 +127,13 @@ public final class PrepareMain {
             if (readingLocalMetadata) throw new InvalidLocalPack(problem);
             throw problem;
         }
-        classpath.add(classpathEntry(bootstrapJar));
+        classpath.add(classpathEntry(bootstrapJar, platform));
         List<String> jvm = new ArrayList<>(metadata.jvm);
         jvm.addAll(userJvm);
         jvm.add("-Doutlands.relauncher.child=true");
         jvm.add("-Djava.library.path=" + natives);
         jvm.add("-cp");
-        jvm.add(String.join(";", classpath));
+        jvm.add(String.join(platform.pathSeparator(), classpath));
         jvm.add(CHILD_MAIN);
         writeAtomically(argFile, output -> JavaArgFile.write(output, jvm, JavaArgFile.launcherCharset()));
 
@@ -231,9 +230,23 @@ public final class PrepareMain {
         return options;
     }
 
-    private static String classpathEntry(Path path) throws IOException {
+    private static LaunchPlatform currentPlatform() throws IOException {
+        LaunchPlatform platform = LaunchPlatform.current();
+        require(platform != null, "Preparation requires Windows, Linux, or macOS on x86_64 or arm64");
+        return platform;
+    }
+
+    private static int currentJavaMajor() throws IOException {
+        String version = System.getProperty("java.specification.version", "0");
+        int major = Integer.parseInt(version.startsWith("1.") ? version.substring(2) : version);
+        require(major >= InstallerMetadata.MIN_JAVA, "Preparation requires Java 25 or newer");
+        return major;
+    }
+
+    static String classpathEntry(Path path, LaunchPlatform platform) throws IOException {
         String value = path.toString();
-        require(value.indexOf(';') < 0, "Windows classpath cannot use paths containing semicolons");
+        require(!value.contains(platform.pathSeparator()),
+                "Classpath cannot use paths containing the separator '" + platform.pathSeparator() + "'");
         return value;
     }
 

@@ -9,12 +9,12 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
-/** Argument file encoding shared by the Windows Java 25 probe and game launch. */
+/** Argument file encoding shared by the Java option probe and game launch. */
 public final class JavaArgFile {
     private JavaArgFile() {}
 
     public static Charset launcherCharset() {
-        // The Windows launcher consumes platform-code-page bytes, not Java 25's UTF-8 default charset.
+        // The launcher reads platform-encoded paths, notably the Windows code page rather than the Java default.
         return Charset.forName(System.getProperty("sun.jnu.encoding", StandardCharsets.UTF_8.name()));
     }
 

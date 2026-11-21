@@ -15,6 +15,7 @@ import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.impl.Log4jContextFactory;
 import org.apache.logging.log4j.spi.LoggerContextFactory;
 import top.outlands.relauncher.shared.GameArguments;
+import top.outlands.relauncher.shared.LaunchPlatform;
 import top.outlands.relauncher.shared.SessionWire;
 
 @IFMLLoadingPlugin.Name("Outlands Relauncher")
@@ -26,7 +27,7 @@ public final class RelaunchCorePlugin implements IFMLLoadingPlugin {
 
     @Override
     public void injectData(Map<String, Object> data) {
-        if (!JavaRuntime.isWindowsX64(System.getProperty("os.name", ""), System.getProperty("os.arch"))
+        if (LaunchPlatform.current() == null
                 || FMLLaunchHandler.side() != Side.CLIENT
                 || System.getProperty("outlands.relauncher.child") != null
                 || Launch.classLoader.getResource(OUTLANDS_MARKER) != null) {

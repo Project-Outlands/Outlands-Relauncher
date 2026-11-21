@@ -1,6 +1,7 @@
 package top.outlands.relauncher;
 
 import java.io.DataInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -650,7 +651,7 @@ final class RelaunchOrchestrator {
 
     static ProcessBuilder prepareCommand(Path java, Path gameDir, Path cache, Path run, Path bootstrap, Path gson,
                                          Path localInstaller) {
-        return JavaRuntime.command(gameDir, Arrays.asList(java.toString(), "-cp", bootstrap + ";" + gson, PREPARE,
+        return JavaRuntime.command(gameDir, Arrays.asList(java.toString(), "-cp", bootstrap + File.pathSeparator + gson, PREPARE,
                 cache.toString(), run.toString(), localInstaller == null ? "" : localInstaller.toString(),
                 bootstrap.toString()))
                 .redirectOutput(ProcessBuilder.Redirect.INHERIT).redirectError(ProcessBuilder.Redirect.INHERIT);

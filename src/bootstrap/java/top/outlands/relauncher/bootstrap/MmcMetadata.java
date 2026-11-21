@@ -2,7 +2,6 @@ package top.outlands.relauncher.bootstrap;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonPrimitive;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,6 +18,8 @@ import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
+import top.outlands.relauncher.shared.LaunchPlatform;
+
 import static top.outlands.relauncher.bootstrap.InstallerMetadata.*;
 
 /** Reads Outlands distribution packs, not arbitrary MultiMC or Prism instances. */
@@ -32,7 +33,7 @@ final class MmcMetadata {
 
     private MmcMetadata() {}
 
-    static InstallerMetadata read(ZipFile zip, String osVersion) throws IOException {
+    static InstallerMetadata read(ZipFile zip, LaunchPlatform platform, int javaMajor) throws IOException {
         String root = root(zip);
         JsonObject pack = readJson(zip, root + MANIFEST);
         fields(pack, "formatVersion", "components");
@@ -68,12 +69,25 @@ final class MmcMetadata {
             require("1.12".equals(text(object(minecraft.get("assetIndex")), "id")), "Unsupported MMC asset index");
         }
         if (minecraft.has("compatibleJavaMajors")) {
-            require(array(minecraft.get("compatibleJavaMajors")).contains(new JsonPrimitive(25)),
-                    "MMC pack does not support Java 25");
+            boolean compatible = false;
+            for (JsonElement major : array(minecraft.get("compatibleJavaMajors"))) {
+                require(major.isJsonPrimitive() && major.getAsJsonPrimitive().isNumber(),
+                        "Invalid MMC compatible Java major");
+                try {
+                    int supported = major.getAsBigDecimal().intValueExact();
+                    require(supported > 0, "Invalid MMC compatible Java major");
+                    // A listed major at or above the bootstrap floor establishes the minimum.
+                    compatible |= supported >= MIN_JAVA && supported <= javaMajor;
+                } catch (ArithmeticException | NumberFormatException ex) {
+                    throw new IOException("Invalid MMC compatible Java major", ex);
+                }
+            }
+            require(compatible, "MMC pack lists no compatible Java major from 25 through " + javaMajor);
         }
-        if (forge.has("+traits")) {
-            // Present in the release pack; this macOS-only launch option has no effect on Windows.
-            require(Collections.singletonList("FirstThreadOnMacOS").equals(strings(forge.get("+traits"))), "Unsupported MMC traits");
+        boolean firstThread = forge.has("+traits");
+        if (firstThread) {
+            require(Collections.singletonList("FirstThreadOnMacOS").equals(strings(forge.get("+traits"))),
+                    "Unsupported MMC traits");
         }
         List<String> game = legacyArguments(text(minecraft, "minecraftArguments"));
         require(!game.isEmpty(), "MMC pack has no game argument template");
@@ -82,6 +96,10 @@ final class MmcMetadata {
         game.add(TWEAKER);
         List<String> jvm = forge.has("+jvmArgs") ? strings(forge.get("+jvmArgs")) : Collections.emptyList();
         require(jvm.isEmpty() || Collections.singletonList("-Dfile.encoding=UTF-8").equals(jvm), "Unsupported MMC JVM arguments");
+        if (firstThread && platform.mac()) {
+            jvm = new ArrayList<>(jvm);
+            jvm.add(0, FIRST_THREAD);
+        }
         String version = versions.get(FORGE);
         InstallerMetadata metadata = new InstallerMetadata("1.12.2-Outlands-" + version, game, jvm);
 
@@ -93,17 +111,21 @@ final class MmcMetadata {
         collect(libraries, lwjgl, null);
         collect(libraries, forge, loader);
         boolean foundLoader = false;
+        LwjglCoreNatives lwjglNatives = new LwjglCoreNatives();
         for (JsonObject library : libraries.values()) {
-            if (!selected(library, osVersion)) continue;
             String name = text(library, "name");
+            boolean selected = selected(library, platform);
+            lwjglNatives.record(name, selected);
+            if (!selected) continue;
             if (loader.equals(name)) foundLoader = true;
             if (library.has("MMC-hint")) {
                 metadata.classpath.add(localLoader(zip, root, version, loader));
             } else {
-                metadata.addLibrary(zip, library, name, null);
+                metadata.addLibrary(zip, library, name, null, platform);
             }
         }
-        require(foundLoader, "MMC pack has no Outlands loader for Windows x64");
+        require(foundLoader, "MMC pack has no Outlands loader for " + platform.os() + "/" + platform.arch());
+        lwjglNatives.validate(platform);
 
         JsonObject mainJar = object(minecraft.get("mainJar"));
         fields(mainJar, "name", "downloads");
