@@ -70,7 +70,11 @@ final class RelaunchMessages {
     }
 
     String text(Message message) {
-        return text(message.key, message.arguments);
+        Object[] args = message.arguments.clone();
+        for (int i = 0; i < args.length; i++) {
+            if (args[i] instanceof Message) args[i] = text((Message) args[i]);
+        }
+        return text(message.key, args);
     }
 
     static Message validation(Throwable failure) {

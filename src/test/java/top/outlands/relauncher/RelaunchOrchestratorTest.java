@@ -176,7 +176,7 @@ class RelaunchOrchestratorTest {
     }
 
     @Test
-    void invalidAutoOptionsOpenRepairWithOriginalSettingsAndSaveOptOutAfterStart() throws Exception {
+    void invalidAutoOptionsClearOnlyExtraArgsAndSaveOptOutAfterStart() throws Exception {
         byte[] original = writeConfig("auto", "installers/local.jar",
                 "xms=512M\nxmx=2G\njvmArgs=-XX:+UnknownOption\nother=keep\n");
         ui.selection = (initial, error, validator) -> {
@@ -187,7 +187,7 @@ class RelaunchOrchestratorTest {
             assertEquals("installers/local.jar", initial.localInstaller);
             assertEquals("512M", initial.xms);
             assertEquals("2G", initial.xmx);
-            assertEquals("-XX:+UnknownOption", initial.jvmArgs);
+            assertEquals("", initial.jvmArgs);
             assertFalse(Files.exists(instance.resolve(".outlands-relauncher")));
             assertDoesNotThrow(() -> {
                 assertArrayEquals(original, Files.readAllBytes(config));
@@ -268,7 +268,7 @@ class RelaunchOrchestratorTest {
                 .getBytes(StandardCharsets.UTF_8));
         ui.messages = new RelaunchMessages(Locale.SIMPLIFIED_CHINESE);
         ui.selection = (initial, error, validator) -> {
-            assertEquals("installers/not-outlands.zip", initial.localMmcPack);
+            assertEquals("", initial.localMmcPack);
             assertEquals("所选 ZIP 不是可读取的 Outlands MMC 整合包。请重新选择文件或清空路径。", error);
             return null;
         };
@@ -284,7 +284,7 @@ class RelaunchOrchestratorTest {
         Files.write(installer, new byte[] {1, 2, 3});
         byte[] original = writeConfig("auto");
         ui.selection = (initial, error, validator) -> {
-            assertEquals("installers/local.jar", initial.localInstaller);
+            assertEquals("", initial.localInstaller);
             assertTrue(error.contains("not a readable Outlands installer"));
             return null;
         };
@@ -294,6 +294,34 @@ class RelaunchOrchestratorTest {
         assertEquals(1, ui.configurations);
         assertArrayEquals(original, Files.readAllBytes(config));
         assertFalse(Files.exists(instance.resolve(".outlands-relauncher")));
+    }
+
+    @Test
+    void askAndAutoRepairSeveralInvalidFieldsWithoutWritingTheFile() throws Exception {
+        for (String mode : Arrays.asList("ask", "auto")) {
+            Files.createDirectories(config.getParent());
+            byte[] original = ("mode=" + mode + "\njavaExecutable=missing.exe\nlocalMmcPack=missing.zip\n"
+                    + "librariesDirectory=missing-libs\nxms=bad\nxmx=4G\njvmArgs=-Dvalid=yes\n")
+                    .getBytes(StandardCharsets.UTF_8);
+            Files.write(config, original);
+            ui.selection = (initial, error, validator) -> {
+                assertEquals("", initial.javaExecutable);
+                assertEquals("", initial.localMmcPack);
+                assertEquals("", initial.librariesDirectory);
+                assertEquals("", initial.xms);
+                assertEquals("4G", initial.xmx);
+                assertEquals("-Dvalid=yes", initial.jvmArgs);
+                assertTrue(error.contains("Java 25 or newer"));
+                assertTrue(error.contains("an existing Outlands MMC pack"));
+                assertTrue(error.contains("an existing shared libraries directory"));
+                assertTrue(error.contains("Xms must be a positive size"));
+                return null;
+            };
+            assertNull(launcher(builder -> fail("Should not start a child"), () -> {}).launch(instance,
+                    dir -> fail("Should not capture a session")));
+            assertArrayEquals(original, Files.readAllBytes(config));
+        }
+        assertEquals(2, ui.configurations);
     }
 
     @Test

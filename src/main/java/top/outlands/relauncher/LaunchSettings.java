@@ -35,4 +35,31 @@ final class LaunchSettings {
         this.librariesDirectory = librariesDirectory;
     }
 
+    enum Field { JAVA, INSTALLER, MMC, XMS, XMX, JVM_ARGS, RELEASE, PROXY, MIRROR, LIBRARIES }
+
+    LaunchSettings clear(Field field) {
+        return new LaunchSettings(field == Field.JAVA ? "" : javaExecutable,
+                field == Field.INSTALLER ? "" : localInstaller,
+                field == Field.XMS ? "" : xms, field == Field.XMX ? "" : xmx,
+                field == Field.JVM_ARGS ? "" : jvmArgs, automatic,
+                field == Field.MMC ? "" : localMmcPack, field == Field.RELEASE ? "" : releaseVersion,
+                field == Field.PROXY ? "" : proxy, field == Field.MIRROR ? "" : mavenMirror,
+                field == Field.LIBRARIES ? "" : librariesDirectory);
+    }
+
+    String value(Field field) {
+        switch (field) {
+            case JAVA: return javaExecutable;
+            case INSTALLER: return localInstaller;
+            case MMC: return localMmcPack;
+            case XMS: return xms;
+            case XMX: return xmx;
+            case JVM_ARGS: return jvmArgs;
+            case RELEASE: return releaseVersion;
+            case PROXY: return proxy;
+            case MIRROR: return mavenMirror;
+            case LIBRARIES: return librariesDirectory;
+            default: throw new AssertionError(field);
+        }
+    }
 }

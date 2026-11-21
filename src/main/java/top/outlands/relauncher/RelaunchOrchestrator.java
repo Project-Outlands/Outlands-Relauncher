@@ -22,6 +22,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 
+import top.outlands.relauncher.LaunchSettings.Field;
 import top.outlands.relauncher.RelaunchMessages.Message;
 import top.outlands.relauncher.shared.JvmOptions;
 import top.outlands.relauncher.shared.PackSettings;
@@ -163,22 +164,37 @@ final class RelaunchOrchestrator {
 
     private ValidatedSettings selectSettings(Path gameDir, RelaunchConfig.Mode mode, LaunchSettings initial,
                                              List<String> inherited) throws IOException, InterruptedException {
-        Message error = null;
-        if (mode == RelaunchConfig.Mode.AUTO) {
+        boolean ask = mode == RelaunchConfig.Mode.ASK;
+        boolean javaMissing = initial.javaExecutable.trim().isEmpty();
+        Message error = !ask && javaMissing ? new Message("error.validation.java") : null;
+        if (error != null && !ui.canConfigure()) {
+            ui.fallback(error);
+            return null;
+        }
+        LaunchSettings draft = initial;
+        boolean repairing = ask || javaMissing;
+        // Each successful repair clears a nonempty field. Never overwrite the saved config here.
+        for (;;) {
             try {
-                // An already valid automatic configuration does not need to be rewritten.
-                return validate(gameDir, initial, inherited, false);
-            } catch (IOException invalid) {
-                error = RelaunchMessages.validation(invalid);
+                ValidatedSettings checked = validate(gameDir, draft, inherited, false, repairing);
+                if (!repairing) return checked;
+                break;
+            } catch (ValidationException invalid) {
+                Message issue = RelaunchMessages.validation(invalid);
+                error = error == null ? issue : new Message("validation.join", error, issue);
                 if (!ui.canConfigure()) {
                     ui.fallback(error);
                     return null;
                 }
+                Field field = repairField(invalid, draft, gameDir, inherited);
+                if (field == null || draft.value(field).trim().isEmpty()) break;
+                draft = draft.clear(field);
+                repairing = true;
             }
         }
         AtomicReference<ValidatedSettings> approved = new AtomicReference<>();
-        LaunchSettings selected = ui.configure(initial, error, candidate ->
-                approved.set(validate(gameDir, candidate, inherited, true)), path -> validateJava(gameDir, path));
+        LaunchSettings selected = ui.configure(draft, error, candidate ->
+                approved.set(validate(gameDir, candidate, inherited, true, false)), path -> validateJava(gameDir, path));
         if (selected == null) return null;
         ValidatedSettings checked = approved.get();
         if (checked == null || checked.selected != selected) {
@@ -187,9 +203,61 @@ final class RelaunchOrchestrator {
         return checked;
     }
 
-    private ValidatedSettings validate(Path gameDir, LaunchSettings settings, List<String> inherited, boolean save)
+    private Field repairField(ValidationException invalid, LaunchSettings draft, Path gameDir,
+                              List<String> inherited) throws IOException, InterruptedException {
+        switch (invalid.key()) {
+            case "error.validation.javaPath":
+            case "error.validation.java": return Field.JAVA;
+            case "error.validation.installerPath":
+            case "error.validation.installerMissing":
+            case "error.validation.installerUnreadable":
+            case "error.validation.multiplePackages": return Field.INSTALLER;
+            case "error.validation.mmcPath":
+            case "error.validation.mmcMissing":
+            case "error.validation.mmcUnreadable": return Field.MMC;
+            case "error.validation.librariesPath":
+            case "error.validation.libraries":
+            case "error.validation.librariesOverlap": return Field.LIBRARIES;
+            case "error.validation.pack.releaseVersion": return Field.RELEASE;
+            case "error.validation.pack.proxy": return Field.PROXY;
+            case "error.validation.pack.mavenMirror": return Field.MIRROR;
+            case "error.validation.jvm.heapOverflow":
+            case "error.validation.jvm.heapInvalidSize":
+                return "Xms".equals(invalid.arguments()[0]) ? Field.XMS : Field.XMX;
+            case "error.validation.jvm.heapOrder": return draft.xms.trim().isEmpty() ? Field.XMX : Field.XMS;
+            case "error.validation.jvmRejected":
+                return isolateRejectedOptions(draft, gameDir, inherited);
+            case "error.validation.jvmProbe": return null;
+            default: return invalid.key().startsWith("error.validation.jvm.") ? Field.JVM_ARGS : null;
+        }
+    }
+
+    private Field isolateRejectedOptions(LaunchSettings draft, Path gameDir, List<String> inherited)
+            throws InterruptedException {
+        Path java = RelaunchConfig.resolvePath(gameDir, draft.javaExecutable);
+        Field repair = null;
+        for (Field candidate : Arrays.asList(Field.JVM_ARGS, Field.XMS, Field.XMX)) {
+            if (draft.value(candidate).trim().isEmpty()) continue;
+            LaunchSettings trial = draft.clear(candidate);
+            try {
+                if (optionProbe.accepts(java, gameDir, JvmOptions.resolve(trial.xms, trial.xmx, trial.jvmArgs, inherited))) {
+                    if (repair != null) return null; // More than one edit would work; don't guess which setting is wrong.
+                    repair = candidate;
+                }
+            } catch (ValidationException stillInvalid) {
+                // Removing this field would introduce a validation error, e.g. through inherited heap values.
+            } catch (IOException unavailable) {
+                return null;
+            }
+        }
+        return repair;
+    }
+
+    private ValidatedSettings validate(Path gameDir, LaunchSettings settings, List<String> inherited, boolean save,
+                                       boolean allowUnsetJava)
             throws IOException, InterruptedException {
-        Path java = validateJava(gameDir, settings.javaExecutable);
+        Path java = allowUnsetJava && settings.javaExecutable.trim().isEmpty()
+                ? null : validateJava(gameDir, settings.javaExecutable);
         Path installer = settingPath(gameDir, settings.localInstaller, "error.validation.installerPath");
         Path mmc = settingPath(gameDir, settings.localMmcPack, "error.validation.mmcPath");
         if (installer != null && mmc != null) throw invalid("error.validation.multiplePackages");
@@ -202,11 +270,20 @@ final class RelaunchOrchestrator {
         Path libraries = settingPath(gameDir, settings.librariesDirectory, "error.validation.librariesPath");
         if (libraries != null) {
             if (!Files.isDirectory(libraries)) throw invalid("error.validation.libraries");
+            try {
+                libraries = libraries.toRealPath();
+            } catch (IOException unavailable) {
+                throw invalid("error.validation.libraries", unavailable);
+            }
+            Path cache = gameDir.resolve(".outlands-relauncher/cache");
+            if (libraries.startsWith(cache) || cache.startsWith(libraries)) {
+                throw invalid("error.validation.librariesOverlap");
+            }
             pack.setProperty(PackSettings.LIBRARIES_DIRECTORY, libraries.toString());
         }
         List<String> options = JvmOptions.resolve(settings.xms, settings.xmx, settings.jvmArgs, inherited);
         try {
-            if (optionProbe.accepts(java, gameDir, options)) {
+            if (java == null || optionProbe.accepts(java, gameDir, options)) {
                 return new ValidatedSettings(java, mmc == null ? installer : mmc, pack, options, settings, save);
             }
         } catch (IOException error) {
