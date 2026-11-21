@@ -35,7 +35,6 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 
 import top.outlands.relauncher.RelaunchOrchestrator.InstallAccess;
 import top.outlands.relauncher.RelaunchOrchestrator.ReleaseChoices;
-import top.outlands.relauncher.shared.PackSettings;
 import top.outlands.relauncher.shared.ValidationException;
 
 @SuppressWarnings("serial")
@@ -115,8 +114,7 @@ final class InstallationDialog extends JDialog {
                 form.add(sourceRow(sourceLabel(messages, suggested.kind), selection, null));
             }
         } else {
-            replaceReleaseChoices(releases.presets, suggestedLocal || suggested == null ? null : suggested.selection);
-            releaseNote.setText(messages.text("help.release"));
+            releaseNote.setText(messages.text("help.releaseLoading"));
             JPanel online = new JPanel(new BorderLayout(0, 6));
             online.add(sourceRow(messages.text("field.release"), releaseVersion, refresh), BorderLayout.NORTH);
             online.add(releaseNote, BorderLayout.CENTER);
@@ -195,11 +193,13 @@ final class InstallationDialog extends JDialog {
         boolean online = editable && onlineMethod.isSelected();
         onlineMethod.setEnabled(editable);
         localMethod.setEnabled(editable);
-        releaseVersion.setEnabled(online);
+        boolean versionsReady = releaseRefresh == null && releaseVersion.getItemCount() > 0;
+        releaseVersion.setVisible(versionsReady);
+        releaseVersion.setEnabled(online && versionsReady);
         refresh.setEnabled(online && releaseRefresh == null);
         localPackage.setEnabled(editable && localMethod.isSelected());
         browse.setEnabled(localPackage.isEnabled());
-        install.setEnabled(worker == null);
+        install.setEnabled(worker == null && (locked || !onlineMethod.isSelected() || versionsReady));
     }
 
     private void browsePackage() {
@@ -223,9 +223,8 @@ final class InstallationDialog extends JDialog {
         releaseVersion.setModel(new DefaultComboBoxModel<>(versions.toArray(new String[0])));
         if (selected != null && versions.contains(selected)) {
             releaseVersion.setSelectedItem(selected);
-        } else if (versions.contains(PackSettings.DEFAULT_VERSION)) {
-            releaseVersion.setSelectedItem(PackSettings.DEFAULT_VERSION);
         }
+        // The release catalog supplies newest-first presets; the model selects its first entry by default.
     }
 
     private void refreshReleaseChoices() {
@@ -240,14 +239,17 @@ final class InstallationDialog extends JDialog {
             @Override protected void done() {
                 if (releaseRefresh != this) return;
                 releaseRefresh = null;
+                String selected = (String) releaseVersion.getSelectedItem();
                 try {
-                    replaceReleaseChoices(get(), (String) releaseVersion.getSelectedItem());
+                    replaceReleaseChoices(get(), selected);
                     releaseNote.setText(messages.text("help.release"));
                 } catch (ExecutionException failed) {
+                    if (releaseVersion.getItemCount() == 0) replaceReleaseChoices(releases.presets, null);
                     releaseNote.setText(messages.text("help.releaseOffline"));
                     RelaunchOrchestrator.diagnostic("Could not refresh the Outlands release presets.");
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
+                    if (releaseVersion.getItemCount() == 0) replaceReleaseChoices(releases.presets, null);
                     releaseNote.setText(messages.text("help.releaseOffline"));
                 }
                 updateControls();
@@ -271,7 +273,7 @@ final class InstallationDialog extends JDialog {
     }
 
     private void startInstallation() {
-        if (worker != null) return;
+        if (!install.isEnabled()) return;
         InstallRequest request = selectedRequest();
         if (request == null || request.selection.trim().isEmpty()) {
             showStatus(messages.text("install.selectSource"));

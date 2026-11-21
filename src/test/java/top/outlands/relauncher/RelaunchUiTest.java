@@ -128,39 +128,103 @@ class RelaunchUiTest {
     }
 
     @Test
-    void installerSwitchesBetweenReadOnlyPresetsAndLocalChooser() throws Exception {
+    void onlineOptionsAppearOnlyAfterRefreshAndSelectTheNewestRelease() throws Exception {
         assumeFalse(GraphicsEnvironment.isHeadless(), "A Window needs a graphics display");
-        SwingUtilities.invokeAndWait(() -> {
-            InstallRequest local = new InstallRequest(InstallRequest.Kind.MMC, "local.zip");
-            InstallationDialog dialog = new InstallationDialog(null, MESSAGES,
-                    new LaunchSettings("java", "", "", "", "", false), RELEASES,
-                    unusedInstaller(null, local), local, false);
-            try {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch unblock = new CountDownLatch(1);
+        ReleaseChoices slowReleases = new ReleaseChoices(Arrays.asList(PackSettings.DEFAULT_VERSION), proxy -> {
+            started.countDown();
+            if (!unblock.await(5, TimeUnit.SECONDS)) throw new IOException("Missing test signal");
+            return PRESETS;
+        });
+        InstallRequest local = new InstallRequest(InstallRequest.Kind.MMC, "local.zip");
+        AtomicReference<InstallationDialog> opened = new AtomicReference<>();
+        CountDownLatch refreshed = new CountDownLatch(1);
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                InstallationDialog dialog = new InstallationDialog(null, MESSAGES,
+                        new LaunchSettings("java", "", "", "", "", false), slowReleases,
+                        unusedInstaller(null, local), local, false);
+                opened.set(dialog);
                 JComboBox<?> release = (JComboBox<?>) named(dialog, "releaseVersion");
                 JTextField path = (JTextField) named(dialog, "localOutlandsPackage");
-                JRadioButton localMethod = (JRadioButton) named(dialog, "localMethod");
-                assertTrue(localMethod.isSelected());
+                assertTrue(((JRadioButton) named(dialog, "localMethod")).isSelected());
                 assertEquals("local.zip", path.getText());
                 assertFalse(path.isEditable());
-                assertFalse(release.isEnabled());
+                assertFalse(release.isVisible());
                 assertFalse(named(dialog, "refreshReleases").isEnabled());
-
                 ((JRadioButton) named(dialog, "onlineMethod")).doClick(0);
                 assertFalse(named(dialog, "browsePackage").isEnabled());
+                assertFalse(named(dialog, "startInstallation").isEnabled());
+                requestReleaseRefresh(dialog, refreshed);
+            });
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            SwingUtilities.invokeAndWait(() -> {
+                InstallationDialog dialog = opened.get();
+                JComboBox<?> release = (JComboBox<?>) named(dialog, "releaseVersion");
+                assertEquals(0, release.getItemCount());
+                assertFalse(release.isVisible());
+                assertFalse(named(dialog, "startInstallation").isEnabled());
+                ((JRadioButton) named(dialog, "localMethod")).doClick(0);
+                assertTrue(named(dialog, "browsePackage").isEnabled());
+                assertTrue(named(dialog, "startInstallation").isEnabled());
+                ((JRadioButton) named(dialog, "onlineMethod")).doClick(0);
+                assertFalse(named(dialog, "startInstallation").isEnabled());
+            });
+            unblock.countDown();
+            assertTrue(refreshed.await(5, TimeUnit.SECONDS));
+            SwingUtilities.invokeAndWait(() -> {
+                InstallationDialog dialog = opened.get();
+                JComboBox<?> release = (JComboBox<?>) named(dialog, "releaseVersion");
+                assertTrue(release.isVisible());
                 assertTrue(release.isEnabled());
                 assertFalse(release.isEditable());
                 assertEquals(PRESETS.size(), release.getItemCount());
-                assertEquals(PackSettings.DEFAULT_VERSION, release.getSelectedItem());
-                release.setSelectedItem("2099.12.31");
-                assertEquals(PackSettings.DEFAULT_VERSION, release.getSelectedItem());
-                release.setSelectedItem(PRESETS.get(0));
-                localMethod.doClick(0);
-                assertTrue(named(dialog, "browsePackage").isEnabled());
                 assertEquals(PRESETS.get(0), release.getSelectedItem());
-            } finally {
-                dialog.dispose();
-            }
+                release.setSelectedItem("2099.12.31");
+                assertEquals(PRESETS.get(0), release.getSelectedItem());
+                assertTrue(named(dialog, "startInstallation").isEnabled());
+            });
+        } finally {
+            unblock.countDown();
+            if (opened.get() != null) SwingUtilities.invokeAndWait(opened.get()::dispose);
+        }
+    }
+
+    @Test
+    void failedRefreshOnlyRevealsCachedPresetsAfterTheRequestFinishes() throws Exception {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "A Window needs a graphics display");
+        ReleaseChoices offline = new ReleaseChoices(PRESETS, proxy -> { throw new IOException("offline"); });
+        AtomicReference<InstallationDialog> opened = new AtomicReference<>();
+        CountDownLatch refreshed = new CountDownLatch(1);
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                InstallationDialog dialog = new InstallationDialog(null, MESSAGES,
+                        new LaunchSettings("java", "", "", "", "", false), offline,
+                        unusedInstaller(INSTALLED, OFFICIAL), OFFICIAL, false);
+                opened.set(dialog);
+                assertFalse(named(dialog, "releaseVersion").isVisible());
+                requestReleaseRefresh(dialog, refreshed);
+            });
+            assertTrue(refreshed.await(5, TimeUnit.SECONDS));
+            SwingUtilities.invokeAndWait(() -> {
+                JComboBox<?> release = (JComboBox<?>) named(opened.get(), "releaseVersion");
+                assertTrue(release.isVisible());
+                assertEquals(PRESETS.get(0), release.getSelectedItem());
+                assertTrue(named(opened.get(), "startInstallation").isEnabled());
+            });
+        } finally {
+            if (opened.get() != null) SwingUtilities.invokeAndWait(opened.get()::dispose);
+        }
+    }
+
+    private static void requestReleaseRefresh(InstallationDialog dialog, CountDownLatch refreshed) {
+        JButton refresh = (JButton) named(dialog, "refreshReleases");
+        assertTrue(refresh.isEnabled());
+        refresh.addPropertyChangeListener("enabled", event -> {
+            if (Boolean.TRUE.equals(event.getNewValue())) refreshed.countDown();
         });
+        refresh.doClick(0);
     }
 
     @Test
@@ -193,7 +257,8 @@ class RelaunchUiTest {
         InstallAccess access = new InstallAccess(INSTALLED, OFFICIAL, (settings, request, progress) -> {
             throw new IOException("test failure");
         });
-        withInstaller(access, OFFICIAL, false, dialog -> ((JButton) named(dialog, "startInstallation")).doClick(0),
+        InstallRequest replacement = new InstallRequest(InstallRequest.Kind.MMC, "replacement.zip");
+        withInstaller(access, replacement, false, dialog -> ((JButton) named(dialog, "startInstallation")).doClick(0),
                 dialog -> {
                     assertTrue(dialog.isDisplayable());
                     assertNull(dialog.result());
@@ -224,7 +289,8 @@ class RelaunchUiTest {
         try {
             SwingUtilities.invokeAndWait(() -> {
                 InstallationDialog dialog = new InstallationDialog(null, MESSAGES,
-                        new LaunchSettings("java", "", "", "", "", false), RELEASES, access, OFFICIAL, false);
+                        new LaunchSettings("java", "", "", "", "", false), RELEASES, access,
+                        new InstallRequest(InstallRequest.Kind.MMC, "replacement.zip"), false);
                 opened.set(dialog);
                 dialog.addWindowListener(new WindowAdapter() {
                     @Override public void windowClosed(WindowEvent event) { closed.countDown(); }
