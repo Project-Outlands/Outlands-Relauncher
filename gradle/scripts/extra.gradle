@@ -88,6 +88,8 @@ tasks.named('processResources', ProcessResources) {
     }
 }
 tasks.named('shadowJar') {
+    // Forge instantiates coremods in file name order. Run before 000mixinbooter and other later JARs.
+    archiveBaseName = '000-' + project.property('mod_id')
     relocate 'com.formdev.flatlaf', flatLafPackage
     exclude 'com/formdev/flatlaf/**/*.properties', 'com/formdev/flatlaf/natives/**', 'META-INF/versions/**'
 }

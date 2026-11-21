@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.launchwrapper.Launch;
 import net.minecraftforge.fml.common.FMLCommonHandler;
+import net.minecraftforge.fml.relauncher.FMLInjectionData;
 import net.minecraftforge.fml.relauncher.FMLLaunchHandler;
 import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
 import net.minecraftforge.fml.relauncher.Side;
@@ -25,8 +26,7 @@ public final class RelaunchCorePlugin implements IFMLLoadingPlugin {
     private static final AtomicBoolean ATTEMPTED = new AtomicBoolean();
     private static final String OUTLANDS_MARKER = "net/minecraftforge/common/LoaderVersion.class";
 
-    @Override
-    public void injectData(Map<String, Object> data) {
+    public RelaunchCorePlugin() {
         if (LaunchPlatform.current() == null
                 || FMLLaunchHandler.side() != Side.CLIENT
                 || System.getProperty("outlands.relauncher.child") != null
@@ -34,7 +34,9 @@ public final class RelaunchCorePlugin implements IFMLLoadingPlugin {
             return;
         }
         Object args = Launch.blackboard.get("forgeLaunchArgs");
-        Object location = data.get("mcLocation");
+        // Forge sets these values before discovering coremods. injectData runs after discovery,
+        // when Forge may already have tried to load a Java 25 coremod on Java 8.
+        Object location = FMLInjectionData.data()[6];
         if (!(args instanceof Map) || !(location instanceof File) || !ATTEMPTED.compareAndSet(false, true)) {
             return;
         }
@@ -67,6 +69,10 @@ public final class RelaunchCorePlugin implements IFMLLoadingPlugin {
         for (LoggerContext context : log4j.getSelector().getLoggerContexts()) {
             context.stop();
         }
+    }
+
+    @Override
+    public void injectData(Map<String, Object> data) {
     }
 
     @Override
