@@ -120,6 +120,17 @@ class PrepareMainTest {
     }
 
     @Test
+    void brokenLocalArchiveIsDistinguishedFromDependencyFailures() throws IOException {
+        Path run = Files.createDirectory(root.resolve("run"));
+        Path archive = Files.write(root.resolve("local.jar"), new byte[] {1, 2, 3});
+        Path bootstrap = Files.createFile(root.resolve("bootstrap.jar"));
+        String[] args = {root.resolve("cache").toString(), run.toString(), archive.toString(), bootstrap.toString()};
+        assertThrows(PrepareMain.InvalidLocalPack.class,
+                () -> PrepareMain.prepare(args, uri -> { throw new AssertionError("Invalid archive must not fetch dependencies"); }, null));
+        assertFalse(Files.exists(run.resolve("java.args")));
+    }
+
+    @Test
     void pinnedInstallerAndArtifactsCanBeReusedOfflineAndRepairSameSizeCorruption() throws IOException {
         Fixture fixture = fixture(true, "hello.dll", version -> {});
         fixture.prepare(true);

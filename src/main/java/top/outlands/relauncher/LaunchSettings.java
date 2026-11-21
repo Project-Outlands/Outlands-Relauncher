@@ -35,6 +35,12 @@ final class LaunchSettings {
         this.librariesDirectory = librariesDirectory;
     }
 
+    LaunchSettings withArchive(String path) {
+        boolean mmc = !localMmcPack.trim().isEmpty();
+        return new LaunchSettings(javaExecutable, mmc ? "" : path, xms, xmx, jvmArgs, automatic,
+                mmc ? path : "", releaseVersion, proxy, mavenMirror, librariesDirectory);
+    }
+
     enum Field { JAVA, INSTALLER, MMC, XMS, XMX, JVM_ARGS, RELEASE, PROXY, MIRROR, LIBRARIES }
 
     LaunchSettings clear(Field field) {

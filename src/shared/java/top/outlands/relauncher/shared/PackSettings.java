@@ -6,6 +6,7 @@ import java.net.URISyntaxException;
 
 /** Options passed from the setup window to the isolated MMC preparation process. */
 public final class PackSettings {
+    public static final int INVALID_LOCAL_PACK_EXIT = 2;
     public static final String FILE_NAME = "pack-options.properties";
     public static final String DEFAULT_VERSION = "2026.11.16";
     public static final String RELEASE_VERSION = "releaseVersion";

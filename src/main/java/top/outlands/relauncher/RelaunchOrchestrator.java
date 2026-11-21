@@ -107,46 +107,73 @@ final class RelaunchOrchestrator {
             if (config.mode == RelaunchConfig.Mode.ASK && !ui.canConfigure()) return null;
             LaunchSettings initial = config.settings();
             List<String> inherited = ManagementFactory.getRuntimeMXBean().getInputArguments();
-            ValidatedSettings settings = selectSettings(gameDir, config.mode, initial, inherited);
+            ValidatedSettings settings = selectSettings(gameDir, config.mode, initial, inherited, null);
             if (settings == null) return null;
             failure = "fallback.session";
             Session session = capture.capture(gameDir);
 
-            failure = "fallback.runDirectory";
-            Path root = RelaunchPaths.directory(gameDir, ".outlands-relauncher");
-            Path runs = RelaunchPaths.directory(root, "runs");
-            Path cache = RelaunchPaths.directory(root, "cache");
-            try (Run run = new Run(Files.createTempDirectory(runs, "run-"))) {
-                Path bootstrap = extract(run.dir, "bootstrap.jar");
-                Path gson = extract(run.dir, "gson.jar");
-                Files.write(run.dir.resolve(JvmOptions.FILE_NAME), settings.options, StandardCharsets.UTF_8);
-                try (OutputStream output = Files.newOutputStream(run.dir.resolve(PackSettings.FILE_NAME))) {
-                    settings.packOptions.store(output, null);
+            for (;;) {
+                failure = "fallback.runDirectory";
+                Path root = RelaunchPaths.directory(gameDir, ".outlands-relauncher");
+                Path runs = RelaunchPaths.directory(root, "runs");
+                Path cache = RelaunchPaths.directory(root, "cache");
+                failure = "fallback.persistPack";
+                try (ManagedPack staged = settings.archive == null ? null : ManagedPack.stage(gameDir, settings.archive.toRealPath());
+                     Run run = new Run(Files.createTempDirectory(runs, "run-"))) {
+                    failure = "fallback.runDirectory";
+                    Path bootstrap = extract(run.dir, "bootstrap.jar");
+                    Path gson = extract(run.dir, "gson.jar");
+                    Files.write(run.dir.resolve(JvmOptions.FILE_NAME), settings.options, StandardCharsets.UTF_8);
+                    try (OutputStream output = Files.newOutputStream(run.dir.resolve(PackSettings.FILE_NAME))) {
+                        settings.packOptions.store(output, null);
+                    }
+                    failure = "fallback.prepare";
+                    Process prepare = run.start(prepareCommand(settings.java, gameDir, cache, run.dir, bootstrap, gson,
+                            staged == null ? null : staged.path()));
+                    final int status;
+                    // Both child JVMs treat this pipe closing as loss of their Forge owner.
+                    try (OutputStream parentPipe = prepare.getOutputStream()) {
+                        status = prepare.waitFor();
+                    }
+                    if (status != 0 && (status != PackSettings.INVALID_LOCAL_PACK_EXIT || staged == null)) {
+                        diagnostic("Outlands preparation exited with code " + status + ".");
+                        throw new IOException("Preparation failed");
+                    }
+                    if (status == 0) {
+                        Path args = run.dir.resolve("java.args");
+                        Path properties = run.dir.resolve("launch.properties");
+                        RelaunchPaths.requireFile(args);
+                        RelaunchPaths.requireFile(properties);
+                        failure = "fallback.launchMetadata";
+                        Handoff handoff = session.resolve(properties);
+                        failure = "fallback.start";
+                        if (Thread.currentThread().isInterrupted()) {
+                            throw new InterruptedException();
+                        }
+                        child = run.start(gameCommand(settings.java, gameDir, args));
+                        LaunchSettings persisted = settings.selected;
+                        boolean save = settings.save;
+                        if (staged != null) {
+                            staged.retain();
+                            String localPath = gameDir.relativize(staged.path()).toString();
+                            persisted = persisted.withArchive(localPath);
+                            save |= !localPath.equals(settings.selected.localMmcPack.isEmpty()
+                                    ? settings.selected.localInstaller : settings.selected.localMmcPack);
+                        }
+                        return finishGame(child, handoff, config, save ? persisted : null);
+                    }
                 }
-                failure = "fallback.prepare";
-                Process prepare = run.start(prepareCommand(settings.java, gameDir, cache, run.dir, bootstrap, gson,
-                        settings.archive));
-                final int status;
-                // Both child JVMs treat this pipe closing as loss of their Forge owner.
-                try (OutputStream parentPipe = prepare.getOutputStream()) {
-                    status = prepare.waitFor();
+                // Local metadata can fail after preflight; do not misclassify network/download failures.
+                boolean mmc = !settings.selected.localMmcPack.trim().isEmpty();
+                Message issue = new Message(mmc ? "error.validation.mmcUnreadable" : "error.validation.installerUnreadable");
+                if (!ui.canConfigure()) {
+                    ui.fallback(issue);
+                    return null;
                 }
-                if (status != 0) {
-                    diagnostic("Outlands preparation exited with code " + status + ".");
-                    throw new IOException("Preparation failed");
-                }
-                Path args = run.dir.resolve("java.args");
-                Path properties = run.dir.resolve("launch.properties");
-                RelaunchPaths.requireFile(args);
-                RelaunchPaths.requireFile(properties);
-                failure = "fallback.launchMetadata";
-                Handoff handoff = session.resolve(properties);
-                failure = "fallback.start";
-                if (Thread.currentThread().isInterrupted()) {
-                    throw new InterruptedException();
-                }
-                child = run.start(gameCommand(settings.java, gameDir, args));
-                return finishGame(child, handoff, config, settings);
+                failure = "fallback.settings";
+                settings = selectSettings(gameDir, RelaunchConfig.Mode.ASK,
+                        settings.selected.clear(mmc ? Field.MMC : Field.INSTALLER), inherited, issue);
+                if (settings == null) return null;
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -163,10 +190,11 @@ final class RelaunchOrchestrator {
     }
 
     private ValidatedSettings selectSettings(Path gameDir, RelaunchConfig.Mode mode, LaunchSettings initial,
-                                             List<String> inherited) throws IOException, InterruptedException {
+                                             List<String> inherited, Message initialError)
+            throws IOException, InterruptedException {
         boolean ask = mode == RelaunchConfig.Mode.ASK;
         boolean javaMissing = initial.javaExecutable.trim().isEmpty();
-        Message error = !ask && javaMissing ? new Message("error.validation.java") : null;
+        Message error = !ask && javaMissing ? new Message("error.validation.java") : initialError;
         if (error != null && !ui.canConfigure()) {
             ui.fallback(error);
             return null;
@@ -397,9 +425,9 @@ final class RelaunchOrchestrator {
                 .redirectOutput(ProcessBuilder.Redirect.INHERIT).redirectError(ProcessBuilder.Redirect.INHERIT);
     }
 
-    private int finishGame(Process child, Handoff handoff, RelaunchConfig config, ValidatedSettings settings) {
+    private int finishGame(Process child, Handoff handoff, RelaunchConfig config, LaunchSettings toSave) {
         try {
-            if (settings.save) config.save(settings.selected);
+            if (toSave != null) config.save(toSave);
         } catch (IOException | RuntimeException saveFailure) {
             diagnostic("The Outlands process started, but relaunch settings could not be saved.");
         }

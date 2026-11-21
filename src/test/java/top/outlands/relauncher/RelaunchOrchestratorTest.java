@@ -24,6 +24,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import top.outlands.relauncher.shared.PackSettings;
+
 class RelaunchOrchestratorTest {
     @TempDir Path temp;
     private Path instance;
@@ -106,7 +108,7 @@ class RelaunchOrchestratorTest {
                 Files.createDirectory(otherRun);
                 assertEquals("top.outlands.relauncher.bootstrap.PrepareMain", command.get(3));
                 assertEquals(instance.resolve(".outlands-relauncher/cache").toString(), command.get(4));
-                assertEquals(installer.toString(), command.get(6));
+                assertStagedPack(installer, Paths.get(command.get(6)));
                 assertEquals(8, command.size());
                 assertEquals(expectedOptions, Files.readAllLines(Paths.get(command.get(5)).resolve("jvm-options.txt"),
                         StandardCharsets.UTF_8));
@@ -138,7 +140,7 @@ class RelaunchOrchestratorTest {
         RelaunchConfig saved = RelaunchConfig.read(instance);
         assertEquals(RelaunchConfig.Mode.AUTO, saved.mode);
         assertEquals(selectedJava, saved.javaExecutable());
-        assertEquals(installer, saved.localInstaller());
+        assertStagedPack(installer, saved.localInstaller());
         assertEquals(custom, saved.settings().jvmArgs);
         assertEquals(1, ui.configurations);
         assertTrue(ui.fallbacks.isEmpty());
@@ -237,7 +239,7 @@ class RelaunchOrchestratorTest {
         byte[] original = Files.readAllBytes(config);
         RelaunchOrchestrator launcher = launcher(builder -> {
             List<String> command = builder.command();
-            assertEquals(mmc.toString(), command.get(6));
+            assertStagedPack(mmc, Paths.get(command.get(6)));
             Properties properties = new Properties();
             try (InputStream input = Files.newInputStream(Paths.get(command.get(5), "pack-options.properties"))) {
                 properties.load(input);
@@ -251,7 +253,87 @@ class RelaunchOrchestratorTest {
         assertNull(launcher.launch(instance, dir -> metadata -> fail("Preparation did not finish")));
         assertEquals(0, ui.configurations);
         assertArrayEquals(original, Files.readAllBytes(config));
+        try (Stream<Path> entries = Files.list(instance.resolve("outlands"))) {
+            assertEquals(0, entries.count(), "Failed preparation must not retain a staged copy");
+        }
         try (Stream<Path> entries = Files.list(libraries)) {
+            assertEquals(0, entries.count());
+        }
+    }
+
+    @Test
+    void successfulLocalPacksMigrateAndRelaunchWithoutOriginalFiles() throws Exception {
+        Path mmc = instance.resolve("installers/local.zip");
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(mmc))) {
+            for (String entry : Arrays.asList("mmc-pack.json", "patches/net.minecraft.json", "patches/org.lwjgl3.json",
+                    "patches/net.minecraftforge.json")) {
+                zip.putNextEntry(new ZipEntry(entry));
+                if (entry.contains("net.minecraftforge")) {
+                    zip.write("{\"mainClass\":\"top.outlands.foundation.boot.Foundation\"}".getBytes(StandardCharsets.UTF_8));
+                }
+                zip.closeEntry();
+            }
+        }
+        for (Path source : Arrays.asList(installer, mmc)) {
+            String key = source.equals(mmc) ? "localMmcPack" : "localInstaller";
+            Files.createDirectories(config.getParent());
+            Files.write(config, ("mode=auto\njavaExecutable=java home/bin/java.exe\n" + key + "=installers/"
+                    + source.getFileName() + "\njvmArgs=-Dkeep=yes\n").getBytes(StandardCharsets.UTF_8));
+            Path[] preparedArchive = {null};
+            RelaunchOrchestrator launcher = launcher(builder -> {
+                List<String> command = builder.command();
+                if (command.get(1).equals("-cp")) {
+                    Path used = Paths.get(command.get(6));
+                    if (preparedArchive[0] == null) assertStagedPack(source, used);
+                    else assertEquals(preparedArchive[0], used);
+                    preparedArchive[0] = used;
+                    prepare(command);
+                }
+                return new FakeProcess(0, new ArrayList<>(), false);
+            }, () -> {});
+            assertEquals(Integer.valueOf(0), launcher.launch(instance, dir -> metadata -> stdin -> {}));
+            RelaunchConfig saved = RelaunchConfig.read(instance);
+            String path = key.equals("localMmcPack") ? saved.settings().localMmcPack : saved.settings().localInstaller;
+            assertFalse(Paths.get(path).isAbsolute());
+            assertEquals(preparedArchive[0], instance.resolve(path));
+            assertEquals(RelaunchConfig.Mode.AUTO, saved.mode);
+            assertEquals("-Dkeep=yes", saved.settings().jvmArgs);
+            Files.delete(source);
+            byte[] savedConfig = Files.readAllBytes(config);
+            assertEquals(Integer.valueOf(0), launcher.launch(instance, dir -> metadata -> stdin -> {}));
+            assertArrayEquals(savedConfig, Files.readAllBytes(config));
+        }
+        assertEquals(0, ui.configurations);
+    }
+
+    private void assertStagedPack(Path original, Path staged) throws IOException {
+        assertNotEquals(original, staged);
+        assertEquals(instance.resolve("outlands"), staged.getParent());
+        assertTrue(staged.getFileName().toString().endsWith(original.equals(installer) ? ".jar" : ".zip"));
+        assertArrayEquals(Files.readAllBytes(original), Files.readAllBytes(staged));
+    }
+
+    @Test
+    void localMetadataRejectedByPreparationReopensSettingsWithoutDeletingTheOriginal() throws Exception {
+        byte[] originalConfig = writeConfig("auto", "installers/local.jar", "jvmArgs=-Dkeep=yes\n");
+        ui.selection = (initial, error, validator) -> {
+            assertEquals("", initial.localInstaller);
+            assertEquals("java home/bin/java.exe", initial.javaExecutable);
+            assertEquals("-Dkeep=yes", initial.jvmArgs);
+            assertTrue(error.contains("not a readable Outlands installer"));
+            return null;
+        };
+        RelaunchOrchestrator launcher = launcher(builder -> {
+            assertEquals("-cp", builder.command().get(1));
+            assertStagedPack(installer, Paths.get(builder.command().get(6)));
+            return new FakeProcess(PackSettings.INVALID_LOCAL_PACK_EXIT, new ArrayList<>(), false);
+        }, () -> fail("Forge logging must remain available"));
+        assertNull(launcher.launch(instance, dir -> metadata -> fail("Preparation did not finish")));
+        assertEquals(1, ui.configurations);
+        assertArrayEquals(originalConfig, Files.readAllBytes(config));
+        assertTrue(Files.isRegularFile(installer));
+        assertRunsEmpty();
+        try (Stream<Path> entries = Files.list(instance.resolve("outlands"))) {
             assertEquals(0, entries.count());
         }
     }

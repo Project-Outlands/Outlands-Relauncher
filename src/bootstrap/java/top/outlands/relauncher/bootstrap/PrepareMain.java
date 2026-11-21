@@ -50,7 +50,7 @@ public final class PrepareMain {
             prepare(args, options::download, release, options);
         } catch (IOException | RuntimeException ex) {
             System.err.println("Outlands preparation failed: " + ex.getMessage());
-            System.exit(1);
+            System.exit(ex instanceof InvalidLocalPack ? PackSettings.INVALID_LOCAL_PACK_EXIT : 1);
         }
     }
 
@@ -71,15 +71,18 @@ public final class PrepareMain {
         Path bootstrapJar = absoluteFile(args[3], "Bootstrap JAR");
         List<String> userJvm = readJvmOptions(runDir);
         VerifiedCache cache = new VerifiedCache(Paths.get(args[0]), downloader, options);
-        Path archive = args[2].isEmpty() ? cache.obtain(release, null) : absoluteFile(args[2], "Local Outlands package");
-        boolean mmc = (args[2].isEmpty() ? release.path : args[2]).toLowerCase(Locale.ROOT).endsWith(".zip");
+        boolean local = !args[2].isEmpty();
+        boolean mmc = (local ? args[2] : release.path).toLowerCase(Locale.ROOT).endsWith(".zip");
         List<String> classpath = new ArrayList<>();
         Path natives = runDir.resolve("natives");
         InstallerMetadata metadata;
-        try (ZipFile zip = new ZipFile(archive.toFile())) {
+        boolean readingLocalMetadata = local;
+        try (ZipFile zip = new ZipFile((local ? absoluteFile(args[2], "Local Outlands package")
+                : cache.obtain(release, null)).toFile())) {
             String osVersion = System.getProperty("os.version", "");
             metadata = mmc ? MmcMetadata.read(zip, osVersion) : InstallerMetadata.read(zip, osVersion);
-            if (mmc && args[2].isEmpty()) {
+            readingLocalMetadata = false;
+            if (mmc && !local) {
                 require(release.path.equals(releasePath(metadata.id.substring("1.12.2-Outlands-".length()))),
                         "Outlands release does not match the requested MMC package version");
             }
@@ -93,6 +96,9 @@ public final class PrepareMain {
             for (InstallerMetadata.Artifact artifact : metadata.natives) {
                 extractor.extract(cache.obtain(artifact, null), artifact.excludes);
             }
+        } catch (IOException problem) {
+            if (readingLocalMetadata) throw new InvalidLocalPack(problem);
+            throw problem;
         }
         classpath.add(classpathEntry(bootstrapJar));
         List<String> jvm = new ArrayList<>(metadata.jvm);
@@ -112,6 +118,14 @@ public final class PrepareMain {
         }
         writeAtomically(propertiesFile, output -> properties.store(output, null));
         System.out.println("Outlands preparation complete");
+    }
+
+    static final class InvalidLocalPack extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        InvalidLocalPack(IOException cause) {
+            super("Could not read local Outlands package metadata: " + cause.getMessage(), cause);
+        }
     }
 
     private static Properties readPackOptions(Path runDir) throws IOException {
