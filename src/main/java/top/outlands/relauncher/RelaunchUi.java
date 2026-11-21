@@ -52,6 +52,7 @@ import com.formdev.flatlaf.FlatSystemProperties;
 import com.formdev.flatlaf.util.UIScale;
 
 import top.outlands.relauncher.RelaunchMessages.Message;
+import top.outlands.relauncher.RelaunchOrchestrator.JavaSelectionValidator;
 import top.outlands.relauncher.shared.PackSettings;
 
 final class RelaunchUi implements RelaunchOrchestrator.Interaction {
@@ -62,12 +63,13 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
     @Override
     public LaunchSettings configure(LaunchSettings initial, Message initialError,
-            RelaunchOrchestrator.SettingsValidator validator) throws InterruptedException {
+            RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator)
+            throws InterruptedException {
         if (!canConfigure()) {
             return null;
         }
         RelaunchMessages messages = RelaunchMessages.display();
-        return showModal(() -> new SettingsDialog(messages, initial, initialError, validator), dialog -> dialog.result);
+        return showModal(() -> new SettingsDialog(messages, initial, initialError, validator, javaValidator), dialog -> dialog.result);
     }
 
     @Override
@@ -186,7 +188,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private LaunchSettings result;
 
         SettingsDialog(RelaunchMessages messages, LaunchSettings initial, Message initialError,
-                       RelaunchOrchestrator.SettingsValidator validator) {
+                       RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator) {
             super((Frame) null, messages.text("settings.title"), Dialog.ModalityType.APPLICATION_MODAL);
             this.messages = messages;
             automatic = new JCheckBox(messages.text("settings.automatic"));
@@ -211,6 +213,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     JComponent.WHEN_IN_FOCUSED_WINDOW);
 
             javaPath.setText(initial.javaExecutable);
+            javaPath.setEditable(false);
             localPackage.setText(initial.localMmcPack.isEmpty() ? initial.localInstaller : initial.localMmcPack);
             releaseVersion.setText(initial.releaseVersion);
             proxy.setText(initial.proxy);
@@ -232,8 +235,13 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             addRow(basics, 2, label(messages.text("field.xmx"), KeyEvent.VK_M, xmx.field()), xmx, null);
             addNote(basics, 3, messages.text("help.heap"));
             browseJava.getAccessibleContext().setAccessibleName(messages.text("access.java"));
-            browseJava.addActionListener(event -> browse(javaPath, messages.text("chooser.java.title"),
-                    messages.text("chooser.java.filter"), "exe"));
+            browseJava.addActionListener(event -> {
+                JFileChooser chooser = fileChooser("chooser.java.title", "chooser.java.filter", "exe");
+                String path = selectedPath(javaPath, chooser);
+                if (path != null) {
+                    validateAsync("validation.checkingJava", () -> javaValidator.validate(path), () -> javaPath.setText(path));
+                }
+            });
 
             JPanel advanced = new JPanel(new GridBagLayout());
             addRow(advanced, 0, label(messages.text("field.package"), KeyEvent.VK_P, localPackage), localPackage,
@@ -260,8 +268,8 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS,
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, KeyEvent.SHIFT_DOWN_MASK)));
             browsePackage.getAccessibleContext().setAccessibleName(messages.text("access.package"));
-            browsePackage.addActionListener(event -> browse(localPackage, messages.text("chooser.package.title"),
-                    messages.text("chooser.package.filter"), "zip", "jar"));
+            browsePackage.addActionListener(event -> browse(localPackage, "chooser.package.title",
+                    "chooser.package.filter", "zip", "jar"));
             browseLibraries.getAccessibleContext().setAccessibleName(messages.text("access.libraries.browse"));
             browseLibraries.addActionListener(event -> {
                 JFileChooser chooser = createChooser(messages);
@@ -365,20 +373,30 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
 
         private void browse(JTextField field, String title, String description, String... extensions) {
+            choosePath(field, fileChooser(title, description, extensions));
+        }
+
+        private JFileChooser fileChooser(String title, String description, String... extensions) {
             JFileChooser chooser = createChooser(messages);
-            chooser.setDialogTitle(title);
-            chooser.setFileFilter(new FileNameExtensionFilter(description, extensions));
-            choosePath(field, chooser);
+            chooser.setDialogTitle(messages.text(title));
+            chooser.setFileFilter(new FileNameExtensionFilter(messages.text(description), extensions));
+            return chooser;
         }
 
         private void choosePath(JTextField field, JFileChooser chooser) {
+            String path = selectedPath(field, chooser);
+            if (path != null) field.setText(path);
+        }
+
+        private String selectedPath(JTextField field, JFileChooser chooser) {
             File current = new File(field.getText());
             if (current.isAbsolute()) {
                 chooser.setSelectedFile(current);
             }
             if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION && isDisplayable()) {
-                field.setText(chooser.getSelectedFile().getAbsolutePath());
+                return chooser.getSelectedFile().getAbsolutePath();
             }
+            return null;
         }
 
         private void validateSettings() {
@@ -391,12 +409,23 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     xms.field().getText(), xmx.field().getText(), jvmArgs.getText(), automatic.isSelected(), mmcPack ? packagePath : "",
                     releaseVersion.getText().trim(), proxy.getText().trim(), mavenMirror.getText().trim(),
                     librariesDirectory.getText());
+            validateAsync("validation.checking", () -> validator.validate(candidate), () -> {
+                result = candidate;
+                dispose();
+            });
+        }
+
+        private interface ValidationTask {
+            void run() throws IOException, InterruptedException;
+        }
+
+        private void validateAsync(String statusKey, ValidationTask task, Runnable success) {
             setEditing(false);
-            showStatus(messages.text("validation.checking"));
+            showStatus(messages.text(statusKey));
             validation = new SwingWorker<Void, Void>() {
                 @Override
                 protected Void doInBackground() throws IOException, InterruptedException {
-                    validator.validate(candidate);
+                    task.run();
                     return null;
                 }
 
@@ -408,9 +437,8 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     validation = null;
                     try {
                         get();
-                        result = candidate;
-                        dispose();
-                        return;
+                        showStatus("");
+                        success.run();
                     } catch (ExecutionException failure) {
                         showStatus(messages.text(RelaunchMessages.validation(failure.getCause())));
                     } catch (InterruptedException interrupted) {

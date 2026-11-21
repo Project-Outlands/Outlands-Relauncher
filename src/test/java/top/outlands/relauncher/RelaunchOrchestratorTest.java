@@ -47,16 +47,15 @@ class RelaunchOrchestratorTest {
     }
 
     @Test
-    void continueForgeLeavesFirstRunUntouchedAndPrefillsDetectedJava() throws Exception {
-        Path detected = Paths.get(System.getProperty("java.home")).resolve("bin/java.exe").normalize();
+    void continueForgeLeavesFirstRunUntouchedWithoutProbingJava() throws Exception {
         ui.selection = (initial, error, validator) -> {
             assertTrue(initial.automatic);
-            assertEquals(detected, instance.resolve(initial.javaExecutable).normalize());
+            assertEquals("", initial.javaExecutable);
             assertUntouchedFirstRun();
             return null;
         };
         RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
-                (exe, dir) -> exe.equals(detected), (exe, dir, options) -> fail("Should not preflight on cancel"),
+                (exe, dir) -> fail("Should not scan for Java"), (exe, dir, options) -> fail("Should not preflight on cancel"),
                 () -> fail("Should not stop logging"));
         assertNull(launcher.launch(instance, dir -> fail("Should not capture session")));
         assertEquals(1, ui.configurations);
@@ -471,7 +470,8 @@ class RelaunchOrchestratorTest {
 
         @Override public boolean canConfigure() { return configurable; }
         @Override public LaunchSettings configure(LaunchSettings initial, RelaunchMessages.Message initialError,
-                RelaunchOrchestrator.SettingsValidator validator) throws InterruptedException {
+                RelaunchOrchestrator.SettingsValidator validator, RelaunchOrchestrator.JavaSelectionValidator javaValidator)
+                throws InterruptedException {
             assertTrue(configurable, "Headless launch must not open settings");
             configurations++;
             return selection.select(initial, initialError == null ? null : messages.text(initialError), validator);

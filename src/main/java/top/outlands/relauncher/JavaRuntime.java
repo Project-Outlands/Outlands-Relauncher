@@ -1,26 +1,20 @@
 package top.outlands.relauncher;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Pattern;
 
 import top.outlands.relauncher.shared.JavaArgFile;
 
@@ -34,36 +28,6 @@ final class JavaRuntime {
 
     static boolean isWindowsX64(String os, String arch) {
         return os.toLowerCase(Locale.ROOT).startsWith("windows") && isX64(arch);
-    }
-
-    static List<Path> candidates(String currentHome, String javaHome, String path) {
-        Set<Path> paths = new LinkedHashSet<>();
-        addCandidate(paths, currentHome, "bin/java.exe");
-        addCandidate(paths, javaHome, "bin/java.exe");
-        if (path != null) {
-            for (String entry : path.split(Pattern.quote(File.pathSeparator))) {
-                String bin = entry.trim();
-                if (bin.length() >= 2 && bin.startsWith("\"") && bin.endsWith("\"")) {
-                    bin = bin.substring(1, bin.length() - 1);
-                }
-                addCandidate(paths, bin, "java.exe");
-            }
-        }
-        return new ArrayList<>(paths);
-    }
-
-    private static void addCandidate(Set<Path> paths, String dir, String relative) {
-        if (dir == null || dir.isEmpty()) {
-            return;
-        }
-        try {
-            Path root = Paths.get(dir);
-            if (root.isAbsolute()) {
-                paths.add(root.resolve(relative).normalize());
-            }
-        } catch (InvalidPathException ignored) {
-            // A malformed PATH entry does not hide later Java installations.
-        }
     }
 
     static ProcessBuilder command(Path gameDir, List<String> argv) {
@@ -158,6 +122,13 @@ final class JavaRuntime {
                 arch = value;
             }
         }
-        return "25".equals(version) && isX64(arch);
+        if (!isX64(arch) || !version.matches("[0-9]+")) {
+            return false;
+        }
+        try {
+            return Integer.parseInt(version) >= 25;
+        } catch (NumberFormatException invalidFeatureVersion) {
+            return false;
+        }
     }
 }

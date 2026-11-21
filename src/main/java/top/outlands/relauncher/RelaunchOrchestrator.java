@@ -33,13 +33,18 @@ final class RelaunchOrchestrator {
 
     interface Interaction {
         default boolean canConfigure() { return true; }
-        LaunchSettings configure(LaunchSettings initial, Message initialError, SettingsValidator validator)
+        LaunchSettings configure(LaunchSettings initial, Message initialError, SettingsValidator validator,
+                                 JavaSelectionValidator javaValidator)
                 throws InterruptedException;
         void fallback(Message reason);
     }
 
     interface SettingsValidator {
         void validate(LaunchSettings settings) throws IOException, InterruptedException;
+    }
+
+    interface JavaSelectionValidator {
+        void validate(String path) throws IOException, InterruptedException;
     }
 
     interface SessionCapture {
@@ -100,10 +105,6 @@ final class RelaunchOrchestrator {
             failure = "fallback.settings";
             if (config.mode == RelaunchConfig.Mode.ASK && !ui.canConfigure()) return null;
             LaunchSettings initial = config.settings();
-            if (initial.javaExecutable.trim().isEmpty()) {
-                Path detected = detectJava(gameDir);
-                if (detected != null) initial = initial.withJava(detected.toString());
-            }
             List<String> inherited = ManagementFactory.getRuntimeMXBean().getInputArguments();
             ValidatedSettings settings = selectSettings(gameDir, config.mode, initial, inherited);
             if (settings == null) return null;
@@ -177,7 +178,7 @@ final class RelaunchOrchestrator {
         }
         AtomicReference<ValidatedSettings> approved = new AtomicReference<>();
         LaunchSettings selected = ui.configure(initial, error, candidate ->
-                approved.set(validate(gameDir, candidate, inherited, true)));
+                approved.set(validate(gameDir, candidate, inherited, true)), path -> validateJava(gameDir, path));
         if (selected == null) return null;
         ValidatedSettings checked = approved.get();
         if (checked == null || checked.selected != selected) {
@@ -188,10 +189,7 @@ final class RelaunchOrchestrator {
 
     private ValidatedSettings validate(Path gameDir, LaunchSettings settings, List<String> inherited, boolean save)
             throws IOException, InterruptedException {
-        Path java = settingPath(gameDir, settings.javaExecutable, "error.validation.javaPath");
-        if (java == null || !probe.accepts(java, gameDir)) {
-            throw invalid("error.validation.java");
-        }
+        Path java = validateJava(gameDir, settings.javaExecutable);
         Path installer = settingPath(gameDir, settings.localInstaller, "error.validation.installerPath");
         Path mmc = settingPath(gameDir, settings.localMmcPack, "error.validation.mmcPath");
         if (installer != null && mmc != null) throw invalid("error.validation.multiplePackages");
@@ -273,12 +271,10 @@ final class RelaunchOrchestrator {
         return new ValidationException(key, new RelaunchMessages(Locale.ENGLISH).text(key), cause);
     }
 
-    private Path detectJava(Path gameDir) throws InterruptedException {
-        for (Path candidate : JavaRuntime.candidates(System.getProperty("java.home"), System.getenv("JAVA_HOME"),
-                System.getenv("PATH"))) {
-            if (probe.accepts(candidate, gameDir)) return candidate;
-        }
-        return null;
+    private Path validateJava(Path gameDir, String value) throws IOException, InterruptedException {
+        Path java = settingPath(gameDir, value, "error.validation.javaPath");
+        if (java == null || !probe.accepts(java, gameDir)) throw invalid("error.validation.java");
+        return java;
     }
 
     private static final class ValidatedSettings {

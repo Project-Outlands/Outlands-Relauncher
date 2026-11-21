@@ -35,8 +35,4 @@ final class LaunchSettings {
         this.librariesDirectory = librariesDirectory;
     }
 
-    LaunchSettings withJava(String executable) {
-        return new LaunchSettings(executable, localInstaller, xms, xmx, jvmArgs, automatic, localMmcPack, releaseVersion,
-                proxy, mavenMirror, librariesDirectory);
-    }
 }

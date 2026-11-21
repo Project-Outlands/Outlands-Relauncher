@@ -21,7 +21,7 @@ class RelaunchUiTest {
         assumeFalse(GraphicsEnvironment.isHeadless(), "A Window needs a graphics display");
         SwingUtilities.invokeAndWait(() -> {
             RelaunchUi.SettingsDialog dialog = new RelaunchUi.SettingsDialog(new RelaunchMessages(Locale.ENGLISH),
-                    new LaunchSettings("", "", "", "", "", false), null, candidate -> {});
+                    new LaunchSettings("", "", "", "", "", false), null, candidate -> {}, path -> {});
             try {
                 JToggleButton advanced = advancedToggle(dialog);
                 assertNotNull(advanced);

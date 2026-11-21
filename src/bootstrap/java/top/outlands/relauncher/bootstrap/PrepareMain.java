@@ -39,8 +39,8 @@ public final class PrepareMain {
             String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
             require(System.getProperty("os.name", "").startsWith("Windows")
                     && ("amd64".equals(arch) || "x86_64".equals(arch))
-                    && "25".equals(System.getProperty("java.specification.version")),
-                    "Preparation requires Windows x64 and Java 25");
+                    && Integer.parseInt(System.getProperty("java.specification.version", "0")) >= 25,
+                    "Preparation requires Windows x64 and Java 25 or newer");
             ParentPipe.watch(System.in);
             Properties settings = readPackOptions(Paths.get(args[1]));
             DownloadOptions options = DownloadOptions.read(settings, Paths.get("").toAbsolutePath());
