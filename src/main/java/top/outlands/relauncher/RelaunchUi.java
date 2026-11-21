@@ -159,6 +159,8 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
     @SuppressWarnings("serial")
     static final class SettingsDialog extends JDialog {
+        private static final int ROW_COLUMN_GAP = 8;
+
         private final RelaunchMessages messages;
         private final JTextField javaPath = field("javaExecutable", 28);
         private final JTextField localPackage = field("localOutlandsPackage", 28);
@@ -243,7 +245,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             addNote(advanced, 5, messages.text("help.proxy"));
             addRow(advanced, 6, label(messages.text("field.mirror"), KeyEvent.VK_V, mavenMirror), mavenMirror, null);
             addNote(advanced, 7, messages.text("help.mirror"));
-            JPanel libraryButtons = new JPanel(new BorderLayout(UIScale.scale(8), 0));
+            JPanel libraryButtons = new JPanel(new BorderLayout(ROW_COLUMN_GAP, 0));
             libraryButtons.add(browseLibraries, BorderLayout.LINE_START);
             libraryButtons.add(clearLibraries, BorderLayout.LINE_END);
             addRow(advanced, 8, label(messages.text("field.libraries"), KeyEvent.VK_D, librariesDirectory), librariesDirectory,
@@ -467,7 +469,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             // Keep each help note close to its field; put the extra space above the next field.
             int top = UIScale.scale(row == 0 ? 3 : 10);
             int bottom = UIScale.scale(3);
-            constraints.insets = new Insets(top, 0, bottom, 8);
+            constraints.insets = new Insets(top, 0, bottom, ROW_COLUMN_GAP);
             panel.add(label, constraints);
             constraints.gridx = 1;
             constraints.weightx = 1;
