@@ -48,7 +48,7 @@ class RelaunchMessagesTest {
         assertEquals("第 2 行的 JVM 参数不受支持。请每行只填写一个参数。", chinese.text(optionMessage));
 
         IOException version = assertThrows(IOException.class, () -> PackSettings.releaseVersion("bad-version"));
-        assertEquals("请输入 Outlands 发布版本（例如 " + PackSettings.DEFAULT_VERSION + "），或将此字段留空。",
+        assertEquals("请从预设列表选择 Outlands 发布版本，或选择本地 MMC ZIP 或安装器 JAR。",
                 chinese.text(RelaunchMessages.validation(version)));
         assertEquals("无法检查启动设置，请核对输入后重试。",
                 chinese.text(RelaunchMessages.validation(new IOException("Private input"))));

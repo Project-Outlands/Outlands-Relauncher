@@ -8,8 +8,10 @@ import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
@@ -26,6 +28,7 @@ import top.outlands.relauncher.LaunchSettings.Field;
 import top.outlands.relauncher.RelaunchMessages.Message;
 import top.outlands.relauncher.shared.JvmOptions;
 import top.outlands.relauncher.shared.PackSettings;
+import top.outlands.relauncher.shared.ReleaseCatalog;
 import top.outlands.relauncher.shared.ValidationException;
 
 final class RelaunchOrchestrator {
@@ -35,7 +38,8 @@ final class RelaunchOrchestrator {
     interface Interaction {
         default boolean canConfigure() { return true; }
         LaunchSettings configure(LaunchSettings initial, Message initialError, SettingsValidator validator,
-                                 JavaSelectionValidator javaValidator, PackAuthorSettings policy, AuthorSettingsSaver saveAuthorSettings)
+                                 JavaSelectionValidator javaValidator, PackAuthorSettings policy,
+                                 AuthorSettingsSaver saveAuthorSettings, ReleaseChoices releases)
                 throws InterruptedException;
         void fallback(Message reason);
     }
@@ -50,6 +54,20 @@ final class RelaunchOrchestrator {
 
     interface AuthorSettingsSaver {
         void save(PackAuthorSettings policy) throws IOException;
+    }
+
+    interface ReleaseLoader {
+        List<String> refresh(String proxy) throws IOException, InterruptedException;
+    }
+
+    static final class ReleaseChoices {
+        final List<String> presets;
+        final ReleaseLoader loader;
+
+        ReleaseChoices(List<String> presets, ReleaseLoader loader) {
+            this.presets = presets;
+            this.loader = loader;
+        }
     }
 
     interface SessionCapture {
@@ -202,6 +220,7 @@ final class RelaunchOrchestrator {
                                              List<String> inherited, Message initialError)
             throws IOException, InterruptedException {
         PackAuthorSettings policy = config.authorSettings();
+        checkPreviouslySelectedRelease(gameDir, initial);
         boolean ask = mode == RelaunchConfig.Mode.ASK;
         boolean javaMissing = initial.javaExecutable.trim().isEmpty();
         Message error = !ask && javaMissing ? new Message("error.validation.java", policy.minimumJava) : initialError;
@@ -242,7 +261,8 @@ final class RelaunchOrchestrator {
                 }
             }
             approved.set(validate(gameDir, candidate, inherited, true, false, config.authorSettings().minimumJava));
-        }, path -> validateJava(gameDir, path, config.authorSettings().minimumJava), policy, config::saveAuthorSettings);
+        }, path -> validateJava(gameDir, path, config.authorSettings().minimumJava), policy, config::saveAuthorSettings,
+                new ReleaseChoices(cachedReleases(gameDir), proxy -> refreshReleases(gameDir, proxy)));
         if (selected == null) return null;
         ValidatedSettings checked = approved.get();
         if (checked == null || checked.selected != selected) {
@@ -316,7 +336,13 @@ final class RelaunchOrchestrator {
         if (installer != null) validateArchive(installer, false);
         if (mmc != null) validateArchive(mmc, true);
         Properties pack = new Properties();
-        pack.setProperty(PackSettings.RELEASE_VERSION, PackSettings.releaseVersion(settings.releaseVersion));
+        if (installer == null && mmc == null) {
+            String release = PackSettings.releaseVersion(settings.releaseVersion);
+            if (!PackSettings.DEFAULT_VERSION.equals(release) && !cachedReleases(gameDir).contains(release)) {
+                throw invalid("error.validation.pack.releaseVersion");
+            }
+            pack.setProperty(PackSettings.RELEASE_VERSION, release);
+        }
         if (PackSettings.proxy(settings.proxy) != null) pack.setProperty(PackSettings.PROXY, settings.proxy.trim());
         if (PackSettings.mirror(settings.mavenMirror) != null) pack.setProperty(PackSettings.MAVEN_MIRROR, settings.mavenMirror.trim());
         Path libraries = settingPath(gameDir, settings.librariesDirectory, "error.validation.librariesPath");
@@ -342,6 +368,43 @@ final class RelaunchOrchestrator {
             throw invalid("error.validation.jvmProbe", error);
         }
         throw invalid("error.validation.jvmRejected");
+    }
+
+    private static void checkPreviouslySelectedRelease(Path gameDir, LaunchSettings settings) throws InterruptedException {
+        if (!settings.localInstaller.trim().isEmpty() || !settings.localMmcPack.trim().isEmpty()
+                || settings.releaseVersion.trim().isEmpty()) return;
+        try {
+            String release = PackSettings.releaseVersion(settings.releaseVersion);
+            // Only a missing preset needs the network. This also makes author presets portable to a fresh instance.
+            if (!PackSettings.DEFAULT_VERSION.equals(release) && !cachedReleases(gameDir).contains(release)) {
+                refreshReleases(gameDir, settings.proxy);
+            }
+        } catch (ValidationException invalid) {
+            // Let the regular settings validation report the invalid version or proxy.
+        } catch (IOException unavailable) {
+            diagnostic("Could not verify the previously selected Outlands release against the official catalog.");
+        }
+    }
+
+    private static List<String> cachedReleases(Path gameDir) {
+        Path root = gameDir.resolve(".outlands-relauncher");
+        Path cache = root.resolve("cache");
+        try {
+            if (plainDirectory(root) && plainDirectory(cache)) return ReleaseCatalog.cached(cache);
+        } catch (IOException unreadable) {
+            diagnostic("Could not read the cached Outlands release list; using the bundled preset.");
+        }
+        return Collections.singletonList(PackSettings.DEFAULT_VERSION);
+    }
+
+    private static boolean plainDirectory(Path path) throws IOException {
+        return Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) && path.equals(path.toRealPath());
+    }
+
+    private static List<String> refreshReleases(Path gameDir, String proxy) throws IOException, InterruptedException {
+        PackSettings.proxy(proxy);
+        Path root = RelaunchPaths.directory(gameDir, ".outlands-relauncher");
+        return ReleaseCatalog.refresh(RelaunchPaths.directory(root, "cache"), proxy);
     }
 
     private static void validateArchive(Path archive, boolean mmc) throws IOException {

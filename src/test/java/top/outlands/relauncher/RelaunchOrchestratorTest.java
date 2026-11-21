@@ -217,6 +217,45 @@ class RelaunchOrchestratorTest {
     }
 
     @Test
+    void releaseVersionMustComeFromThePresetsEvenWhenItLooksLikeADate() throws Exception {
+        byte[] original = writeConfig("auto", "", "releaseVersion=not-a-release\n");
+        ui.selection = (initial, error, validator) -> {
+            assertEquals("", initial.releaseVersion);
+            assertTrue(error.contains("preset list"));
+            LaunchSettings invalid = new LaunchSettings(initial.javaExecutable, "", "", "", "", true,
+                    "", "2099.12.31", "", "", "");
+            assertThrows(IOException.class, () -> validator.validate(invalid));
+            validate(validator, initial); // The built-in release works without a catalog or network.
+            return null;
+        };
+        assertNull(launcher(builder -> fail("Should not start a child"), () -> {}).launch(instance,
+                dir -> fail("Should not capture session")));
+        assertArrayEquals(original, Files.readAllBytes(config));
+        assertFalse(Files.exists(instance.resolve(".outlands-relauncher")));
+    }
+
+    @Test
+    void cachedOfficialPresetReachesPreparationWithoutOpeningSettings() throws Exception {
+        Path cache = Files.createDirectories(instance.resolve(".outlands-relauncher/cache"));
+        Files.write(cache.resolve("release-catalog.txt"),
+                "outlands-release-catalog-v1\n2026.11.20\n".getBytes(StandardCharsets.US_ASCII));
+        byte[] original = writeConfig("auto", "", "releaseVersion=2026.11.20\n");
+        RelaunchOrchestrator launcher = launcher(builder -> {
+            List<String> command = builder.command();
+            assertEquals("", command.get(6));
+            Properties properties = new Properties();
+            try (InputStream input = Files.newInputStream(Paths.get(command.get(5), "pack-options.properties"))) {
+                properties.load(input);
+            }
+            assertEquals("2026.11.20", properties.getProperty("releaseVersion"));
+            return new FakeProcess(1, new ArrayList<>(), false);
+        }, () -> fail("Forge logging must remain available"));
+        assertNull(launcher.launch(instance, dir -> metadata -> fail("Preparation did not finish")));
+        assertEquals(0, ui.configurations);
+        assertArrayEquals(original, Files.readAllBytes(config));
+    }
+
+    @Test
     void localMmcAndDownloadSettingsReachPreparationWithoutChangingTheInstance() throws Exception {
         Path mmc = instance.resolve("installers/local.zip");
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(mmc))) {
@@ -233,7 +272,7 @@ class RelaunchOrchestratorTest {
         Path libraries = Files.createDirectory(instance.resolve("library share"));
         Files.createDirectories(config.getParent());
         Files.write(config, ("mode=auto\njavaExecutable=java home/bin/java.exe\nlocalMmcPack=installers/local.zip\n"
-                + "releaseVersion=2026.11.14\nproxy=http://localhost:8080\n"
+                + "releaseVersion=not-a-preset\nproxy=http://localhost:8080\n"
                 + "mavenMirror=https://mirror.example/maven/\nlibrariesDirectory=library share\n")
                 .getBytes(StandardCharsets.UTF_8));
         byte[] original = Files.readAllBytes(config);
@@ -244,7 +283,7 @@ class RelaunchOrchestratorTest {
             try (InputStream input = Files.newInputStream(Paths.get(command.get(5), "pack-options.properties"))) {
                 properties.load(input);
             }
-            assertEquals("2026.11.14", properties.getProperty("releaseVersion"));
+            assertNull(properties.getProperty("releaseVersion"), "Local sources must ignore the release selection");
             assertEquals("http://localhost:8080", properties.getProperty("proxy"));
             assertEquals("https://mirror.example/maven/", properties.getProperty("mavenMirror"));
             assertEquals(libraries.toString(), properties.getProperty("librariesDirectory"));
@@ -631,7 +670,8 @@ class RelaunchOrchestratorTest {
         @Override public boolean canConfigure() { return configurable; }
         @Override public LaunchSettings configure(LaunchSettings initial, RelaunchMessages.Message initialError,
                 RelaunchOrchestrator.SettingsValidator validator, RelaunchOrchestrator.JavaSelectionValidator javaValidator,
-                PackAuthorSettings policy, RelaunchOrchestrator.AuthorSettingsSaver saveAuthorSettings)
+                PackAuthorSettings policy, RelaunchOrchestrator.AuthorSettingsSaver saveAuthorSettings,
+                RelaunchOrchestrator.ReleaseChoices releases)
                 throws InterruptedException {
             assertTrue(configurable, "Headless launch must not open settings");
             configurations++;

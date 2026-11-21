@@ -19,6 +19,7 @@ import java.util.zip.ZipFile;
 import top.outlands.relauncher.shared.JavaArgFile;
 import top.outlands.relauncher.shared.JvmOptions;
 import top.outlands.relauncher.shared.PackSettings;
+import top.outlands.relauncher.shared.ReleaseCatalog;
 
 import static top.outlands.relauncher.bootstrap.InstallerMetadata.require;
 
@@ -44,9 +45,15 @@ public final class PrepareMain {
             ParentPipe.watch(System.in);
             Properties settings = readPackOptions(Paths.get(args[1]));
             DownloadOptions options = DownloadOptions.read(settings, Paths.get("").toAbsolutePath());
-            String version = PackSettings.releaseVersion(settings.getProperty(PackSettings.RELEASE_VERSION, ""));
-            InstallerMetadata.Artifact release = args[2].isEmpty() && !PackSettings.DEFAULT_VERSION.equals(version)
-                    ? customRelease(Paths.get(args[0]), options::download, version) : RELEASE;
+            InstallerMetadata.Artifact release = RELEASE;
+            if (args[2].isEmpty()) {
+                String version = PackSettings.releaseVersion(settings.getProperty(PackSettings.RELEASE_VERSION, ""));
+                if (!PackSettings.DEFAULT_VERSION.equals(version)) {
+                    Path cache = Paths.get(args[0]);
+                    require(ReleaseCatalog.cached(cache).contains(version), "Outlands release is not in the preset list");
+                    release = customRelease(cache, options::download, version);
+                }
+            }
             prepare(args, options::download, release, options);
         } catch (IOException | RuntimeException ex) {
             System.err.println("Outlands preparation failed: " + ex.getMessage());

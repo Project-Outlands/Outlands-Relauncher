@@ -21,8 +21,7 @@ public final class PackSettings {
         if (version.isEmpty()) return DEFAULT_VERSION;
         if (!version.matches("20[0-9]{2}\\.(?:0[1-9]|1[0-2])\\.(?:0[1-9]|[12][0-9]|3[01])(?:-[1-9][0-9]{0,3})?")) {
             throw new ValidationException("error.validation.pack.releaseVersion",
-                    "Use an Outlands release version like " + DEFAULT_VERSION + " or leave the field empty.",
-                    DEFAULT_VERSION);
+                    "Choose an Outlands release from the preset list, or select a local MMC ZIP or installer JAR.");
         }
         return version;
     }
