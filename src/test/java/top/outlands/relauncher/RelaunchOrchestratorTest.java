@@ -57,7 +57,7 @@ class RelaunchOrchestratorTest {
             return null;
         };
         RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
-                (exe, dir) -> fail("Should not scan for Java"), (exe, dir, options) -> fail("Should not preflight on cancel"),
+                (exe, dir, minimumJava) -> fail("Should not scan for Java"), (exe, dir, options) -> fail("Should not preflight on cancel"),
                 () -> fail("Should not stop logging"));
         assertNull(launcher.launch(instance, dir -> fail("Should not capture session")));
         assertEquals(1, ui.configurations);
@@ -68,7 +68,7 @@ class RelaunchOrchestratorTest {
     void forgeModeBypassesSettingsAndJavaProbes() throws Exception {
         byte[] original = writeConfig("forge");
         RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
-                (exe, dir) -> fail("Should not probe Java"), (exe, dir, options) -> fail("Should not preflight"),
+                (exe, dir, minimumJava) -> fail("Should not probe Java"), (exe, dir, options) -> fail("Should not preflight"),
                 () -> fail("Should not stop logging"));
         assertNull(launcher.launch(instance, dir -> fail("Should not capture session")));
         assertEquals(0, ui.configurations);
@@ -121,7 +121,7 @@ class RelaunchOrchestratorTest {
             assertEquals(Arrays.asList(selectedJava.toString(), "@" + currentRun[0].resolve("java.args")), command);
             assertFalse(Files.exists(config));
             return game;
-        }, (exe, dir) -> exe.equals(selectedJava), (exe, dir, options) -> {
+        }, (exe, dir, minimumJava) -> exe.equals(selectedJava), (exe, dir, options) -> {
             assertEquals(selectedJava, exe);
             assertEquals(instance, dir);
             assertEquals(expectedOptions, options);
@@ -166,7 +166,7 @@ class RelaunchOrchestratorTest {
             return null;
         };
         RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"),
-                (exe, dir) -> exe.equals(java), (exe, dir, options) -> {
+                (exe, dir, minimumJava) -> exe.equals(java), (exe, dir, options) -> {
                     rejectedOptions.addAll(options);
                     return false;
                 }, () -> fail("Should not stop logging"));
@@ -205,7 +205,7 @@ class RelaunchOrchestratorTest {
                 prepare(builder.command());
             }
             return new FakeProcess(0, new ArrayList<>(), false);
-        }, (exe, dir) -> exe.equals(java), (exe, dir, options) -> !options.contains("-XX:+UnknownOption"), () -> {});
+        }, (exe, dir, minimumJava) -> exe.equals(java), (exe, dir, options) -> !options.contains("-XX:+UnknownOption"), () -> {});
 
         assertEquals(Integer.valueOf(0), launcher.launch(instance, dir -> metadata -> stdin -> {}));
         assertEquals(1, ui.configurations);
@@ -407,6 +407,53 @@ class RelaunchOrchestratorTest {
     }
 
     @Test
+    void lockedInvalidSettingsFallBackWithoutOpeningAnUnrepairableDialog() throws Exception {
+        byte[] original = writeConfig("auto", "installers/missing.jar", "author.lockAdvanced=true\n");
+        assertNull(launcher(builder -> fail("Should not start a child"), () -> {}).launch(instance,
+                dir -> fail("Should not capture a session")));
+        assertEquals(0, ui.configurations);
+        assertEquals(1, ui.fallbacks.size());
+        assertTrue(ui.fallbacks.get(0).contains("Select an existing Outlands installer"));
+        assertTrue(ui.fallbacks.get(0).contains("option is locked"));
+        assertArrayEquals(original, Files.readAllBytes(config));
+    }
+
+    @Test
+    void authorPolicyControlsJavaSelectionAndPreservesLockedArguments() throws Exception {
+        writeConfig("ask", "installers/local.jar", "author.lockJvmArguments=true\nauthor.minimumJava=26\n"
+                + "jvmArgs=-Dauthor=yes\n");
+        List<Integer> minimums = new ArrayList<>();
+        ui.selection = (initial, error, validator) -> {
+            assertNull(error);
+            assertTrue(ui.policy.lockJvmArguments);
+            assertEquals(26, ui.policy.minimumJava);
+            assertDoesNotThrow(() -> ui.javaValidator.validate(initial.javaExecutable));
+            LaunchSettings tampered = new LaunchSettings(initial.javaExecutable, initial.localInstaller,
+                    "512M", "2G", "-Doverride=yes", false);
+            assertTrue(assertThrows(IOException.class, () -> validator.validate(tampered)).getMessage().contains("locked"));
+
+            assertDoesNotThrow(() -> ui.authorSaver.save(new PackAuthorSettings(false, true, 27)));
+            assertTrue(assertThrows(IOException.class, () -> ui.javaValidator.validate(initial.javaExecutable))
+                    .getMessage().contains("Java 27 or newer"));
+            LaunchSettings preservesLocks = new LaunchSettings(initial.javaExecutable, initial.localInstaller,
+                    "512M", "2G", initial.jvmArgs, false);
+            assertTrue(assertThrows(IOException.class, () -> validator.validate(preservesLocks))
+                    .getMessage().contains("Java 27 or newer"));
+            return null;
+        };
+        RelaunchOrchestrator launcher = launcher(builder -> fail("Should not start a child"), (exe, dir, minimum) -> {
+            minimums.add(minimum);
+            return exe.equals(java) && minimum <= 26;
+        }, (exe, dir, options) -> true, () -> {});
+        assertNull(launcher.launch(instance, dir -> fail("Should not capture a session")));
+        assertEquals(Arrays.asList(26, 26, 27, 27), minimums);
+        RelaunchConfig saved = RelaunchConfig.read(instance);
+        assertEquals(27, saved.authorSettings().minimumJava);
+        assertEquals("-Dauthor=yes", saved.settings().jvmArgs);
+        assertEquals("", saved.settings().xms);
+    }
+
+    @Test
     void invalidAutomaticInstallerFallsBackWithoutOpeningSettingsWhenHeadless() throws Exception {
         byte[] original = writeConfig("auto", "installers/missing.jar", "");
         ui.configurable = false;
@@ -533,7 +580,7 @@ class RelaunchOrchestratorTest {
     }
 
     private RelaunchOrchestrator launcher(RelaunchOrchestrator.ProcessStarter starter, Runnable releaseLogs) {
-        return launcher(starter, (exe, dir) -> exe.equals(java), (exe, dir, options) -> true, releaseLogs);
+        return launcher(starter, (exe, dir, minimumJava) -> exe.equals(java), (exe, dir, options) -> true, releaseLogs);
     }
 
     private RelaunchOrchestrator launcher(RelaunchOrchestrator.ProcessStarter starter, RelaunchOrchestrator.Probe probe,
@@ -571,6 +618,9 @@ class RelaunchOrchestratorTest {
     private static final class FakeUi implements RelaunchOrchestrator.Interaction {
         RelaunchMessages messages = new RelaunchMessages(Locale.ENGLISH);
         boolean configurable = true;
+        PackAuthorSettings policy;
+        RelaunchOrchestrator.JavaSelectionValidator javaValidator;
+        RelaunchOrchestrator.AuthorSettingsSaver authorSaver;
         int configurations;
         Selection selection = (initial, error, validator) -> {
             validate(validator, initial);
@@ -580,10 +630,14 @@ class RelaunchOrchestratorTest {
 
         @Override public boolean canConfigure() { return configurable; }
         @Override public LaunchSettings configure(LaunchSettings initial, RelaunchMessages.Message initialError,
-                RelaunchOrchestrator.SettingsValidator validator, RelaunchOrchestrator.JavaSelectionValidator javaValidator)
+                RelaunchOrchestrator.SettingsValidator validator, RelaunchOrchestrator.JavaSelectionValidator javaValidator,
+                PackAuthorSettings policy, RelaunchOrchestrator.AuthorSettingsSaver saveAuthorSettings)
                 throws InterruptedException {
             assertTrue(configurable, "Headless launch must not open settings");
             configurations++;
+            this.policy = policy;
+            this.javaValidator = javaValidator;
+            this.authorSaver = saveAuthorSettings;
             return selection.select(initial, initialError == null ? null : messages.text(initialError), validator);
         }
         @Override public void fallback(RelaunchMessages.Message reason) { fallbacks.add(messages.text(reason)); }

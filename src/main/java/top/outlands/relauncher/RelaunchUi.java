@@ -52,6 +52,7 @@ import com.formdev.flatlaf.FlatSystemProperties;
 import com.formdev.flatlaf.util.UIScale;
 
 import top.outlands.relauncher.RelaunchMessages.Message;
+import top.outlands.relauncher.RelaunchOrchestrator.AuthorSettingsSaver;
 import top.outlands.relauncher.RelaunchOrchestrator.JavaSelectionValidator;
 import top.outlands.relauncher.shared.PackSettings;
 
@@ -63,13 +64,14 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
     @Override
     public LaunchSettings configure(LaunchSettings initial, Message initialError,
-            RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator)
-            throws InterruptedException {
+            RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator,
+            PackAuthorSettings policy, AuthorSettingsSaver authorSaver) throws InterruptedException {
         if (!canConfigure()) {
             return null;
         }
         RelaunchMessages messages = RelaunchMessages.display();
-        return showModal(() -> new SettingsDialog(messages, initial, initialError, validator, javaValidator), dialog -> dialog.result);
+        return showModal(() -> new SettingsDialog(messages, initial, initialError, validator, javaValidator,
+                policy, authorSaver), dialog -> dialog.result);
     }
 
     @Override
@@ -164,6 +166,9 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private static final int ROW_COLUMN_GAP = 8;
 
         private final RelaunchMessages messages;
+        private final LaunchSettings initial;
+        private final PackAuthorSettings openingPolicy;
+        private PackAuthorSettings authorSettings;
         private final JTextField javaPath = field("javaExecutable", 28);
         private final JTextField localPackage = field("localOutlandsPackage", 28);
         private final JTextField releaseVersion = field("releaseVersion", 28);
@@ -182,15 +187,20 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final JButton browsePackage;
         private final JButton browseLibraries;
         private final JButton clearLibraries;
+        private final JButton authorButton;
         private final RelaunchOrchestrator.SettingsValidator validator;
         private SwingWorker<Void, Void> validation;
         private Dimension sizeBeforeAdvanced;
         private LaunchSettings result;
 
         SettingsDialog(RelaunchMessages messages, LaunchSettings initial, Message initialError,
-                       RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator) {
+                       RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator,
+                       PackAuthorSettings policy, AuthorSettingsSaver authorSaver) {
             super((Frame) null, messages.text("settings.title"), Dialog.ModalityType.APPLICATION_MODAL);
             this.messages = messages;
+            this.initial = initial;
+            this.openingPolicy = policy;
+            this.authorSettings = policy;
             automatic = new JCheckBox(messages.text("settings.automatic"));
             launch = new JButton(messages.text("button.launch"));
             forge = new JButton(messages.text("button.continue"));
@@ -199,6 +209,9 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             browsePackage = new JButton(messages.text("button.browse"));
             browseLibraries = new JButton(messages.text("button.browse"));
             clearLibraries = new JButton(messages.text("button.clear"));
+            authorButton = new JButton(messages.text("author.title"));
+            authorButton.setName("packAuthorSettings");
+            authorButton.addActionListener(event -> editAuthorSettings(authorSaver));
             this.validator = validator;
             setName("outlandsLaunchSettings");
             setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
@@ -260,7 +273,16 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     libraryButtons);
             addNote(advanced, 9, messages.text("help.libraries"));
             addRow(advanced, 10, label(messages.text("field.options"), KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
-            addNote(advanced, 11, messages.text("help.options"));
+            addNote(advanced, 11, messages.text(policy.lockJvmArguments ? "author.jvmLocked" : "help.options"));
+            JPanel authorActions = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
+            authorActions.add(authorButton);
+            GridBagConstraints authorRow = new GridBagConstraints();
+            authorRow.gridx = 0;
+            authorRow.gridy = 12;
+            authorRow.gridwidth = GridBagConstraints.REMAINDER;
+            authorRow.anchor = GridBagConstraints.LINE_START;
+            authorRow.insets = new Insets(UIScale.scale(8), 0, 0, 0);
+            advanced.add(authorActions, authorRow);
             // Keep keyboard tab traversal consistent with the other input fields.
             jvmArgs.setFocusTraversalKeysEnabled(true);
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.FORWARD_TRAVERSAL_KEYS,
@@ -283,6 +305,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             JPanel toggle = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
             advancedToggle.setMnemonic(KeyEvent.VK_A);
             advancedToggle.setName("advancedToggle");
+            if (policy.lockAdvanced) advancedToggle.setText(messages.text("author.advancedLocked"));
             toggle.add(advancedToggle);
             JPanel options = new JPanel(new BorderLayout(0, 8));
             options.add(toggle, BorderLayout.NORTH);
@@ -340,6 +363,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             content.add(footer, BorderLayout.SOUTH);
             setContentPane(content);
             getRootPane().setDefaultButton(launch);
+            setEditing(true);
             pack();
             Dimension limit = screenSizeLimit();
             setSize(Math.min(getWidth(), limit.width), Math.min(getHeight(), limit.height));
@@ -399,16 +423,66 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             return null;
         }
 
+        private void editAuthorSettings(AuthorSettingsSaver saver) {
+            JCheckBox advancedLock = new JCheckBox(messages.text("author.lockAdvanced"), authorSettings.lockAdvanced);
+            JCheckBox jvmLock = new JCheckBox(messages.text("author.lockJvm"), authorSettings.lockJvmArguments);
+            advancedLock.setEnabled(!authorSettings.lockAdvanced);
+            jvmLock.setEnabled(!authorSettings.lockJvmArguments);
+            JTextField minimum = new JTextField(Integer.toString(authorSettings.minimumJava), 6);
+            JLabel minimumLabel = new JLabel(messages.text("author.minimumJava"));
+            minimumLabel.setLabelFor(minimum);
+            JPanel version = new JPanel(new FlowLayout(FlowLayout.LEADING, UIScale.scale(6), 0));
+            version.add(minimumLabel);
+            version.add(minimum);
+            JTextArea help = new JTextArea(messages.text("author.help", PackAuthorSettings.MINIMUM_JAVA), 4, 36);
+            help.setEditable(false);
+            help.setFocusable(false);
+            help.setOpaque(false);
+            help.setFont(minimumLabel.getFont());
+            help.setLineWrap(true);
+            help.setWrapStyleWord(true);
+            JLabel error = new JLabel();
+            String save = messages.text("author.save");
+            String cancel = messages.text("author.cancel");
+            Object[] form = {advancedLock, jvmLock, version, help, error};
+            while (JOptionPane.showOptionDialog(this, form, messages.text("author.title"),
+                    JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, new Object[] {save, cancel}, save) == 0) {
+                final PackAuthorSettings updated;
+                try {
+                    updated = new PackAuthorSettings(advancedLock.isSelected(), jvmLock.isSelected(),
+                            Integer.parseInt(minimum.getText().trim()));
+                } catch (IllegalArgumentException invalid) {
+                    error.setText(messages.text("author.invalidMinimum", PackAuthorSettings.MINIMUM_JAVA));
+                    continue;
+                }
+                try {
+                    saver.save(updated);
+                    authorSettings = updated;
+                    showStatus(messages.text("author.saved"));
+                } catch (IOException failed) {
+                    RelaunchOrchestrator.diagnostic("Could not save the pack author settings.");
+                    showStatus(messages.text("author.saveFailed"));
+                }
+                return;
+            }
+        }
+
         private void validateSettings() {
             if (validation != null) {
                 return;
             }
+            boolean locked = openingPolicy.lockAdvanced;
             String packagePath = localPackage.getText().trim();
             boolean mmcPack = packagePath.toLowerCase(Locale.ROOT).endsWith(".zip");
-            LaunchSettings candidate = new LaunchSettings(javaPath.getText(), mmcPack ? "" : packagePath,
-                    xms.field().getText(), xmx.field().getText(), jvmArgs.getText(), automatic.isSelected(), mmcPack ? packagePath : "",
-                    releaseVersion.getText().trim(), proxy.getText().trim(), mavenMirror.getText().trim(),
-                    librariesDirectory.getText());
+            String installer = locked ? initial.localInstaller : (mmcPack ? "" : packagePath);
+            String mmc = locked ? initial.localMmcPack : (mmcPack ? packagePath : "");
+            String extra = locked || openingPolicy.lockJvmArguments ? initial.jvmArgs : jvmArgs.getText();
+            LaunchSettings candidate = new LaunchSettings(javaPath.getText(), installer,
+                    xms.field().getText(), xmx.field().getText(), extra, automatic.isSelected(), mmc,
+                    locked ? initial.releaseVersion : releaseVersion.getText().trim(),
+                    locked ? initial.proxy : proxy.getText().trim(),
+                    locked ? initial.mavenMirror : mavenMirror.getText().trim(),
+                    locked ? initial.librariesDirectory : librariesDirectory.getText());
             validateAsync("validation.checking", () -> validator.validate(candidate), () -> {
                 result = candidate;
                 dispose();
@@ -454,11 +528,15 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private void setEditing(boolean enabled) {
             xms.setInputEnabled(enabled);
             xmx.setInputEnabled(enabled);
-            for (JComponent component : new JComponent[] {javaPath, localPackage, releaseVersion, proxy, mavenMirror,
-                    librariesDirectory, jvmArgs, automatic, browseJava, browsePackage, browseLibraries,
-                    clearLibraries, launch}) {
+            for (JComponent component : new JComponent[] {javaPath, automatic, browseJava, launch}) {
                 component.setEnabled(enabled);
             }
+            boolean advancedEditable = enabled && !openingPolicy.lockAdvanced;
+            for (JComponent component : new JComponent[] {advancedToggle, localPackage, releaseVersion, proxy,
+                    mavenMirror, librariesDirectory, browsePackage, browseLibraries, clearLibraries, authorButton}) {
+                component.setEnabled(advancedEditable);
+            }
+            jvmArgs.setEnabled(advancedEditable && !openingPolicy.lockJvmArguments);
         }
 
         private void showStatus(String message) {

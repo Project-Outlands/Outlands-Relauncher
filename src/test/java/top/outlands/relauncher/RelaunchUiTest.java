@@ -11,6 +11,7 @@ import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -21,9 +22,10 @@ class RelaunchUiTest {
         assumeFalse(GraphicsEnvironment.isHeadless(), "A Window needs a graphics display");
         SwingUtilities.invokeAndWait(() -> {
             RelaunchUi.SettingsDialog dialog = new RelaunchUi.SettingsDialog(new RelaunchMessages(Locale.ENGLISH),
-                    new LaunchSettings("", "", "", "", "", false), null, candidate -> {}, path -> {});
+                    new LaunchSettings("", "", "", "", "", false), null, candidate -> {}, path -> {},
+                    PackAuthorSettings.DEFAULT, policy -> {});
             try {
-                JToggleButton advanced = advancedToggle(dialog);
+                JToggleButton advanced = (JToggleButton) named(dialog, "advancedToggle");
                 assertNotNull(advanced);
                 Dimension original = dialog.getSize();
                 advanced.doClick(0);
@@ -42,13 +44,33 @@ class RelaunchUiTest {
         });
     }
 
-    private static JToggleButton advancedToggle(Container parent) {
-        for (Component component : parent.getComponents()) {
-            if (component instanceof JToggleButton && "advancedToggle".equals(component.getName())) {
-                return (JToggleButton) component;
+    @Test
+    void authorLocksDisableOnlyTheirControls() throws Exception {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "A Window needs a graphics display");
+        SwingUtilities.invokeAndWait(() -> {
+            for (boolean lockAdvanced : new boolean[] {false, true}) {
+                RelaunchUi.SettingsDialog dialog = new RelaunchUi.SettingsDialog(new RelaunchMessages(Locale.ENGLISH),
+                        new LaunchSettings("", "", "", "", "-Dauthor=yes", false), null, candidate -> {}, path -> {},
+                        new PackAuthorSettings(lockAdvanced, true, 25), policy -> {});
+                try {
+                    assertEquals(!lockAdvanced, named(dialog, "advancedToggle").isEnabled());
+                    assertFalse(named(dialog, "jvmArgs").isEnabled());
+                    assertEquals(!lockAdvanced, named(dialog, "packAuthorSettings").isEnabled());
+                    assertTrue(named(dialog, "xms").isEnabled());
+                    assertTrue(named(dialog, "xmx").isEnabled());
+                    assertTrue(named(dialog, "launchOutlands").isEnabled());
+                } finally {
+                    dialog.dispose();
+                }
             }
+        });
+    }
+
+    private static Component named(Container parent, String name) {
+        for (Component component : parent.getComponents()) {
+            if (name.equals(component.getName())) return component;
             if (component instanceof Container) {
-                JToggleButton child = advancedToggle((Container) component);
+                Component child = named((Container) component, name);
                 if (child != null) return child;
             }
         }

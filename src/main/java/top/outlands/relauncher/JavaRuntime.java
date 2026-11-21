@@ -38,7 +38,7 @@ final class JavaRuntime {
         return builder;
     }
 
-    static boolean probe(Path java, Path gameDir) throws InterruptedException {
+    static boolean probe(Path java, Path gameDir, int minimumJava) throws InterruptedException {
         if (!java.isAbsolute() || !Files.isRegularFile(java)
                 || !"java.exe".equalsIgnoreCase(java.getFileName().toString())) {
             return false;
@@ -48,7 +48,7 @@ final class JavaRuntime {
         argv.add("-XshowSettings:properties");
         argv.add("-version");
         String output = probeOutput(gameDir, argv);
-        return output != null && matchesProbe(output);
+        return output != null && matchesProbe(output, minimumJava);
     }
 
     static boolean probeOptions(Path java, Path gameDir, List<String> options) throws IOException, InterruptedException {
@@ -106,7 +106,7 @@ final class JavaRuntime {
         return new String(collected.toByteArray(), StandardCharsets.US_ASCII);
     }
 
-    static boolean matchesProbe(String output) {
+    static boolean matchesProbe(String output, int minimumJava) {
         String version = "";
         String arch = "";
         for (String line : output.split("\\R")) {
@@ -126,7 +126,7 @@ final class JavaRuntime {
             return false;
         }
         try {
-            return Integer.parseInt(version) >= 25;
+            return Integer.parseInt(version) >= minimumJava;
         } catch (NumberFormatException invalidFeatureVersion) {
             return false;
         }

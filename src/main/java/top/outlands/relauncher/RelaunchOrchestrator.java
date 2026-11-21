@@ -35,7 +35,7 @@ final class RelaunchOrchestrator {
     interface Interaction {
         default boolean canConfigure() { return true; }
         LaunchSettings configure(LaunchSettings initial, Message initialError, SettingsValidator validator,
-                                 JavaSelectionValidator javaValidator)
+                                 JavaSelectionValidator javaValidator, PackAuthorSettings policy, AuthorSettingsSaver saveAuthorSettings)
                 throws InterruptedException;
         void fallback(Message reason);
     }
@@ -46,6 +46,10 @@ final class RelaunchOrchestrator {
 
     interface JavaSelectionValidator {
         void validate(String path) throws IOException, InterruptedException;
+    }
+
+    interface AuthorSettingsSaver {
+        void save(PackAuthorSettings policy) throws IOException;
     }
 
     interface SessionCapture {
@@ -69,7 +73,7 @@ final class RelaunchOrchestrator {
     }
 
     interface Probe {
-        boolean accepts(Path java, Path gameDir) throws InterruptedException;
+        boolean accepts(Path java, Path gameDir, int minimumJava) throws InterruptedException;
     }
 
     interface OptionProbe {
@@ -107,7 +111,7 @@ final class RelaunchOrchestrator {
             if (config.mode == RelaunchConfig.Mode.ASK && !ui.canConfigure()) return null;
             LaunchSettings initial = config.settings();
             List<String> inherited = ManagementFactory.getRuntimeMXBean().getInputArguments();
-            ValidatedSettings settings = selectSettings(gameDir, config.mode, initial, inherited, null);
+            ValidatedSettings settings = selectSettings(gameDir, config, config.mode, initial, inherited, null);
             if (settings == null) return null;
             failure = "fallback.session";
             Session session = capture.capture(gameDir);
@@ -166,13 +170,18 @@ final class RelaunchOrchestrator {
                 // Local metadata can fail after preflight; do not misclassify network/download failures.
                 boolean mmc = !settings.selected.localMmcPack.trim().isEmpty();
                 Message issue = new Message(mmc ? "error.validation.mmcUnreadable" : "error.validation.installerUnreadable");
+                Field field = mmc ? Field.MMC : Field.INSTALLER;
+                if (config.authorSettings().locks(field)) {
+                    ui.fallback(lockedRepair(issue));
+                    return null;
+                }
                 if (!ui.canConfigure()) {
                     ui.fallback(issue);
                     return null;
                 }
                 failure = "fallback.settings";
-                settings = selectSettings(gameDir, RelaunchConfig.Mode.ASK,
-                        settings.selected.clear(mmc ? Field.MMC : Field.INSTALLER), inherited, issue);
+                settings = selectSettings(gameDir, config, RelaunchConfig.Mode.ASK,
+                        settings.selected.clear(field), inherited, issue);
                 if (settings == null) return null;
             }
         } catch (InterruptedException interrupted) {
@@ -189,12 +198,13 @@ final class RelaunchOrchestrator {
         return null;
     }
 
-    private ValidatedSettings selectSettings(Path gameDir, RelaunchConfig.Mode mode, LaunchSettings initial,
+    private ValidatedSettings selectSettings(Path gameDir, RelaunchConfig config, RelaunchConfig.Mode mode, LaunchSettings initial,
                                              List<String> inherited, Message initialError)
             throws IOException, InterruptedException {
+        PackAuthorSettings policy = config.authorSettings();
         boolean ask = mode == RelaunchConfig.Mode.ASK;
         boolean javaMissing = initial.javaExecutable.trim().isEmpty();
-        Message error = !ask && javaMissing ? new Message("error.validation.java") : initialError;
+        Message error = !ask && javaMissing ? new Message("error.validation.java", policy.minimumJava) : initialError;
         if (error != null && !ui.canConfigure()) {
             ui.fallback(error);
             return null;
@@ -204,31 +214,45 @@ final class RelaunchOrchestrator {
         // Each successful repair clears a nonempty field. Never overwrite the saved config here.
         for (;;) {
             try {
-                ValidatedSettings checked = validate(gameDir, draft, inherited, false, repairing);
+                ValidatedSettings checked = validate(gameDir, draft, inherited, false, repairing, policy.minimumJava);
                 if (!repairing) return checked;
                 break;
             } catch (ValidationException invalid) {
                 Message issue = RelaunchMessages.validation(invalid);
                 error = error == null ? issue : new Message("validation.join", error, issue);
+                Field field = repairField(invalid, draft, gameDir, inherited);
+                if (field != null && policy.locks(field)) {
+                    ui.fallback(lockedRepair(error));
+                    return null;
+                }
                 if (!ui.canConfigure()) {
                     ui.fallback(error);
                     return null;
                 }
-                Field field = repairField(invalid, draft, gameDir, inherited);
                 if (field == null || draft.value(field).trim().isEmpty()) break;
                 draft = draft.clear(field);
                 repairing = true;
             }
         }
         AtomicReference<ValidatedSettings> approved = new AtomicReference<>();
-        LaunchSettings selected = ui.configure(draft, error, candidate ->
-                approved.set(validate(gameDir, candidate, inherited, true, false)), path -> validateJava(gameDir, path));
+        LaunchSettings selected = ui.configure(draft, error, candidate -> {
+            for (Field field : Field.values()) {
+                if (policy.locks(field) && !initial.value(field).equals(candidate.value(field))) {
+                    throw invalid("error.validation.authorLocked");
+                }
+            }
+            approved.set(validate(gameDir, candidate, inherited, true, false, config.authorSettings().minimumJava));
+        }, path -> validateJava(gameDir, path, config.authorSettings().minimumJava), policy, config::saveAuthorSettings);
         if (selected == null) return null;
         ValidatedSettings checked = approved.get();
         if (checked == null || checked.selected != selected) {
             throw new IllegalStateException("Launch settings must be approved before starting");
         }
         return checked;
+    }
+
+    private static Message lockedRepair(Message issue) {
+        return new Message("validation.join", issue, new Message("error.validation.authorLocked"));
     }
 
     private Field repairField(ValidationException invalid, LaunchSettings draft, Path gameDir,
@@ -282,10 +306,10 @@ final class RelaunchOrchestrator {
     }
 
     private ValidatedSettings validate(Path gameDir, LaunchSettings settings, List<String> inherited, boolean save,
-                                       boolean allowUnsetJava)
+                                       boolean allowUnsetJava, int minimumJava)
             throws IOException, InterruptedException {
         Path java = allowUnsetJava && settings.javaExecutable.trim().isEmpty()
-                ? null : validateJava(gameDir, settings.javaExecutable);
+                ? null : validateJava(gameDir, settings.javaExecutable, minimumJava);
         Path installer = settingPath(gameDir, settings.localInstaller, "error.validation.installerPath");
         Path mmc = settingPath(gameDir, settings.localMmcPack, "error.validation.mmcPath");
         if (installer != null && mmc != null) throw invalid("error.validation.multiplePackages");
@@ -376,9 +400,12 @@ final class RelaunchOrchestrator {
         return new ValidationException(key, new RelaunchMessages(Locale.ENGLISH).text(key), cause);
     }
 
-    private Path validateJava(Path gameDir, String value) throws IOException, InterruptedException {
+    private Path validateJava(Path gameDir, String value, int minimumJava) throws IOException, InterruptedException {
         Path java = settingPath(gameDir, value, "error.validation.javaPath");
-        if (java == null || !probe.accepts(java, gameDir)) throw invalid("error.validation.java");
+        if (java == null || !probe.accepts(java, gameDir, minimumJava)) {
+            String key = "error.validation.java";
+            throw new ValidationException(key, new RelaunchMessages(Locale.ENGLISH).text(key, minimumJava), minimumJava);
+        }
         return java;
     }
 

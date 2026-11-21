@@ -13,27 +13,28 @@ class JavaRuntimeTest {
 
     @Test
     void acceptsJava25AndNewer() {
-        assertTrue(JavaRuntime.matchesProbe("    java.specification.version = 25\r\n    os.arch = amd64\r\n"));
-        assertTrue(JavaRuntime.matchesProbe("os.arch=x86_64\njava.specification.version=26"));
-        assertTrue(JavaRuntime.matchesProbe("java.specification.version=100\nos.arch=x64"));
+        assertTrue(JavaRuntime.matchesProbe("    java.specification.version = 25\r\n    os.arch = amd64\r\n", 25));
+        assertTrue(JavaRuntime.matchesProbe("os.arch=x86_64\njava.specification.version=26", 26));
+        assertFalse(JavaRuntime.matchesProbe("os.arch=x86_64\njava.specification.version=25", 26));
+        assertTrue(JavaRuntime.matchesProbe("java.specification.version=100\nos.arch=x64", 25));
     }
 
     @Test
     void rejectsOlderInvalidOrMissingFeatureVersions() {
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=24\nos.arch=amd64"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25.0\nos.arch=amd64"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=26-ea\nos.arch=amd64"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=+25\nos.arch=amd64"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=9999999999\nos.arch=amd64"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=\nos.arch=amd64"));
-        assertFalse(JavaRuntime.matchesProbe("java.version=25\nos.arch=amd64"));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=24\nos.arch=amd64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25.0\nos.arch=amd64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=26-ea\nos.arch=amd64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=+25\nos.arch=amd64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=9999999999\nos.arch=amd64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=\nos.arch=amd64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.version=25\nos.arch=amd64", 25));
     }
 
     @Test
     void requiresX64RuntimeArchitecture() {
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25\nos.arch=aarch64"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=26\nos.arch=x86"));
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25"));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25\nos.arch=aarch64", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=26\nos.arch=x86", 25));
+        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25", 25));
     }
 
     @Test
