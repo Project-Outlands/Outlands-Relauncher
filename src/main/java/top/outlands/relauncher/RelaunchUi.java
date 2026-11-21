@@ -166,8 +166,8 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final JTextField proxy = field("proxy", 28);
         private final JTextField mavenMirror = field("mavenMirror", 28);
         private final JTextField librariesDirectory = field("librariesDirectory", 28);
-        private final JTextField xms = field("xms", 12);
-        private final JTextField xmx = field("xmx", 12);
+        private final HeapInput xms;
+        private final HeapInput xmx;
         private final JTextArea jvmArgs = new JTextArea(5, 28);
         private final JTextArea status = new JTextArea(2, 34);
         private final JCheckBox automatic;
@@ -214,8 +214,8 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             mavenMirror.setText(initial.mavenMirror);
             librariesDirectory.setText(initial.librariesDirectory);
             librariesDirectory.setEditable(false);
-            xms.setText(initial.xms);
-            xmx.setText(initial.xmx);
+            xms = new HeapInput("Xms", initial.xms, messages);
+            xmx = new HeapInput("Xmx", initial.xmx, messages);
             jvmArgs.setName("jvmArgs");
             jvmArgs.setText(initial.jvmArgs);
             jvmArgs.setCaretPosition(0);
@@ -225,8 +225,8 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
             JPanel basics = new JPanel(new GridBagLayout());
             addRow(basics, 0, label(messages.text("field.java"), KeyEvent.VK_J, javaPath), javaPath, browseJava);
-            addRow(basics, 1, label(messages.text("field.xms"), KeyEvent.VK_I, xms), xms, null);
-            addRow(basics, 2, label(messages.text("field.xmx"), KeyEvent.VK_M, xmx), xmx, null);
+            addRow(basics, 1, label(messages.text("field.xms"), KeyEvent.VK_I, xms.field()), xms, null);
+            addRow(basics, 2, label(messages.text("field.xmx"), KeyEvent.VK_M, xmx.field()), xmx, null);
             addNote(basics, 3, messages.text("help.heap"));
             browseJava.getAccessibleContext().setAccessibleName(messages.text("access.java"));
             browseJava.addActionListener(event -> browse(javaPath, messages.text("chooser.java.title"),
@@ -377,7 +377,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             String packagePath = localPackage.getText().trim();
             boolean mmcPack = packagePath.toLowerCase(Locale.ROOT).endsWith(".zip");
             LaunchSettings candidate = new LaunchSettings(javaPath.getText(), mmcPack ? "" : packagePath,
-                    xms.getText(), xmx.getText(), jvmArgs.getText(), automatic.isSelected(), mmcPack ? packagePath : "",
+                    xms.field().getText(), xmx.field().getText(), jvmArgs.getText(), automatic.isSelected(), mmcPack ? packagePath : "",
                     releaseVersion.getText().trim(), proxy.getText().trim(), mavenMirror.getText().trim(),
                     librariesDirectory.getText());
             setEditing(false);
@@ -413,8 +413,10 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         }
 
         private void setEditing(boolean enabled) {
+            xms.setInputEnabled(enabled);
+            xmx.setInputEnabled(enabled);
             for (JComponent component : new JComponent[] {javaPath, localPackage, releaseVersion, proxy, mavenMirror,
-                    librariesDirectory, xms, xmx, jvmArgs, automatic, browseJava, browsePackage, browseLibraries,
+                    librariesDirectory, jvmArgs, automatic, browseJava, browsePackage, browseLibraries,
                     clearLibraries, launch}) {
                 component.setEnabled(enabled);
             }

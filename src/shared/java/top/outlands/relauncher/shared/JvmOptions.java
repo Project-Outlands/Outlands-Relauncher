@@ -101,7 +101,8 @@ public final class JvmOptions {
         }
     }
 
-    private static long heapBytes(String name, String value) throws IOException {
+    /** Parses an explicit heap size; the option name is used to report validation errors. */
+    public static long heapBytes(String name, String value) throws ValidationException {
         Matcher match = HEAP.matcher(value);
         if (match.matches()) {
             try {
