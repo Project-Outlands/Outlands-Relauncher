@@ -35,6 +35,12 @@ final class LaunchSettings {
         this.librariesDirectory = librariesDirectory;
     }
 
+    LaunchSettings withSource(InstallRequest source) {
+        return new LaunchSettings(javaExecutable, source.kind == InstallRequest.Kind.JAR ? source.selection : "",
+                xms, xmx, jvmArgs, automatic, source.kind == InstallRequest.Kind.MMC ? source.selection : "",
+                source.kind == InstallRequest.Kind.ONLINE ? source.selection : "", proxy, mavenMirror, librariesDirectory);
+    }
+
     LaunchSettings withArchive(String path) {
         boolean mmc = !localMmcPack.trim().isEmpty();
         return new LaunchSettings(javaExecutable, mmc ? "" : path, xms, xmx, jvmArgs, automatic,

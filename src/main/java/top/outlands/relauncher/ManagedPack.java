@@ -2,6 +2,7 @@ package top.outlands.relauncher;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -40,6 +41,7 @@ final class ManagedPack implements AutoCloseable {
                 byte[] buffer = new byte[8192];
                 int read;
                 while ((read = input.read(buffer)) != -1) {
+                    if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Local pack copy interrupted");
                     output.write(buffer, 0, read);
                 }
             }

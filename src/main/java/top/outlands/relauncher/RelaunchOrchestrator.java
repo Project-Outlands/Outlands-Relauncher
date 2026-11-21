@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -39,7 +41,7 @@ final class RelaunchOrchestrator {
         default boolean canConfigure() { return true; }
         LaunchSettings configure(LaunchSettings initial, Message initialError, SettingsValidator validator,
                                  JavaSelectionValidator javaValidator, PackAuthorSettings policy,
-                                 AuthorSettingsSaver saveAuthorSettings, ReleaseChoices releases)
+                                 AuthorSettingsSaver saveAuthorSettings, ReleaseChoices releases, InstallAccess installation)
                 throws InterruptedException;
         void fallback(Message reason);
     }
@@ -67,6 +69,28 @@ final class RelaunchOrchestrator {
         ReleaseChoices(List<String> presets, ReleaseLoader loader) {
             this.presets = presets;
             this.loader = loader;
+        }
+    }
+
+    interface InstallationAction {
+        InstalledPack install(LaunchSettings settings, InstallRequest request, Consumer<InstallProgress> progress)
+                throws IOException, InterruptedException;
+    }
+
+    static final class InstallAccess {
+        final InstalledPack initial;
+        final InstallRequest suggested;
+        private final InstallationAction action;
+
+        InstallAccess(InstalledPack initial, InstallRequest suggested, InstallationAction action) {
+            this.initial = initial;
+            this.suggested = suggested;
+            this.action = action;
+        }
+
+        InstalledPack install(LaunchSettings settings, InstallRequest request, Consumer<InstallProgress> progress)
+                throws IOException, InterruptedException {
+            return action.install(settings, request, progress);
         }
     }
 
@@ -128,8 +152,23 @@ final class RelaunchOrchestrator {
             failure = "fallback.settings";
             if (config.mode == RelaunchConfig.Mode.ASK && !ui.canConfigure()) return null;
             LaunchSettings initial = config.settings();
+            InstalledPack installed = null;
+            Message initialError = null;
+            RelaunchConfig.Mode mode = config.mode;
+            try {
+                installed = InstalledPack.read(gameDir);
+            } catch (IOException damaged) {
+                diagnostic("The saved Outlands installation is unavailable; installation is required.");
+                initialError = new Message("install.error.record");
+                mode = RelaunchConfig.Mode.ASK;
+                if (!ui.canConfigure()) {
+                    ui.fallback(initialError);
+                    return null;
+                }
+            }
+            if (installed != null) initial = initial.withSource(installed.source);
             List<String> inherited = ManagementFactory.getRuntimeMXBean().getInputArguments();
-            ValidatedSettings settings = selectSettings(gameDir, config, config.mode, initial, inherited, null);
+            ValidatedSettings settings = selectSettings(gameDir, config, mode, initial, inherited, initialError, installed);
             if (settings == null) return null;
             failure = "fallback.session";
             Session session = capture.capture(gameDir);
@@ -146,9 +185,7 @@ final class RelaunchOrchestrator {
                     Path bootstrap = extract(run.dir, "bootstrap.jar");
                     Path gson = extract(run.dir, "gson.jar");
                     Files.write(run.dir.resolve(JvmOptions.FILE_NAME), settings.options, StandardCharsets.UTF_8);
-                    try (OutputStream output = Files.newOutputStream(run.dir.resolve(PackSettings.FILE_NAME))) {
-                        settings.packOptions.store(output, null);
-                    }
+                    writePackOptions(run.dir, settings.packOptions);
                     failure = "fallback.prepare";
                     Process prepare = run.start(prepareCommand(settings.java, gameDir, cache, run.dir, bootstrap, gson,
                             staged == null ? null : staged.path()));
@@ -182,6 +219,7 @@ final class RelaunchOrchestrator {
                             save |= !localPath.equals(settings.selected.localMmcPack.isEmpty()
                                     ? settings.selected.localInstaller : settings.selected.localMmcPack);
                         }
+                        if (settings.installation == null) rememberLegacyInstallation(gameDir, properties, persisted);
                         return finishGame(child, handoff, config, save ? persisted : null);
                     }
                 }
@@ -199,7 +237,7 @@ final class RelaunchOrchestrator {
                 }
                 failure = "fallback.settings";
                 settings = selectSettings(gameDir, config, RelaunchConfig.Mode.ASK,
-                        settings.selected.clear(field), inherited, issue);
+                        settings.selected.clear(field), inherited, issue, null);
                 if (settings == null) return null;
             }
         } catch (InterruptedException interrupted) {
@@ -217,7 +255,7 @@ final class RelaunchOrchestrator {
     }
 
     private ValidatedSettings selectSettings(Path gameDir, RelaunchConfig config, RelaunchConfig.Mode mode, LaunchSettings initial,
-                                             List<String> inherited, Message initialError)
+                                             List<String> inherited, Message initialError, InstalledPack installed)
             throws IOException, InterruptedException {
         PackAuthorSettings policy = config.authorSettings();
         checkPreviouslySelectedRelease(gameDir, initial);
@@ -234,7 +272,10 @@ final class RelaunchOrchestrator {
         for (;;) {
             try {
                 ValidatedSettings checked = validate(gameDir, draft, inherited, false, repairing, policy.minimumJava);
-                if (!repairing) return checked;
+                if (!repairing) {
+                    checked.installation = installed;
+                    return checked;
+                }
                 break;
             } catch (ValidationException invalid) {
                 Message issue = RelaunchMessages.validation(invalid);
@@ -250,25 +291,55 @@ final class RelaunchOrchestrator {
                 }
                 if (field == null || draft.value(field).trim().isEmpty()) break;
                 draft = draft.clear(field);
+                if (isSourceField(field)) installed = null;
                 repairing = true;
             }
         }
         AtomicReference<ValidatedSettings> approved = new AtomicReference<>();
+        AtomicReference<InstalledPack> current = new AtomicReference<>(installed);
+        InstallRequest suggested = installed == null ? InstallRequest.from(draft) : installed.source;
+        InstallAccess installation = new InstallAccess(installed, suggested, (settings, request, progress) -> {
+            if (policy.lockAdvanced && (current.get() != null || !suggested.matches(request))) {
+                throw invalid("error.validation.authorLocked");
+            }
+            InstalledPack updated = installPack(gameDir, config.authorSettings().minimumJava, settings, request, progress);
+            current.set(updated);
+            return updated;
+        });
         LaunchSettings selected = ui.configure(draft, error, candidate -> {
+            InstalledPack active = current.get();
             for (Field field : Field.values()) {
-                if (policy.locks(field) && !initial.value(field).equals(candidate.value(field))) {
+                if (policy.locks(field) && !(active != null && isSourceField(field))
+                        && !initial.value(field).equals(candidate.value(field))) {
                     throw invalid("error.validation.authorLocked");
                 }
             }
-            approved.set(validate(gameDir, candidate, inherited, true, false, config.authorSettings().minimumJava));
+            if (active != null && !active.source.matches(InstallRequest.from(candidate))) {
+                throw invalid("install.error.sourceChanged");
+            }
+            ValidatedSettings checked = validate(gameDir, candidate, inherited, true, false, config.authorSettings().minimumJava);
+            checked.installation = active;
+            approved.set(checked);
         }, path -> validateJava(gameDir, path, config.authorSettings().minimumJava), policy, config::saveAuthorSettings,
-                new ReleaseChoices(cachedReleases(gameDir), proxy -> refreshReleases(gameDir, proxy)));
+                new ReleaseChoices(cachedReleases(gameDir), proxy -> refreshReleases(gameDir, proxy)), installation);
         if (selected == null) return null;
         ValidatedSettings checked = approved.get();
         if (checked == null || checked.selected != selected) {
             throw new IllegalStateException("Launch settings must be approved before starting");
         }
         return checked;
+    }
+
+    private static boolean isSourceField(Field field) {
+        return field == Field.INSTALLER || field == Field.MMC || field == Field.RELEASE;
+    }
+
+    private static void rememberLegacyInstallation(Path gameDir, Path prepared, LaunchSettings settings) {
+        try {
+            new InstalledPack(InstalledPack.preparedVersion(prepared), InstallRequest.from(settings)).save(gameDir);
+        } catch (IOException unavailable) {
+            diagnostic("Could not record the previously configured Outlands installation.");
+        }
     }
 
     private static Message lockedRepair(Message issue) {
@@ -330,13 +401,31 @@ final class RelaunchOrchestrator {
             throws IOException, InterruptedException {
         Path java = allowUnsetJava && settings.javaExecutable.trim().isEmpty()
                 ? null : validateJava(gameDir, settings.javaExecutable, minimumJava);
+        Path archive = validateSource(gameDir, settings);
+        Properties pack = packOptions(gameDir, settings, archive != null);
+        List<String> options = JvmOptions.resolve(settings.xms, settings.xmx, settings.jvmArgs, inherited);
+        try {
+            if (java == null || optionProbe.accepts(java, gameDir, options)) {
+                return new ValidatedSettings(java, archive, pack, options, settings, save);
+            }
+        } catch (IOException error) {
+            throw invalid("error.validation.jvmProbe", error);
+        }
+        throw invalid("error.validation.jvmRejected");
+    }
+
+    private static Path validateSource(Path gameDir, LaunchSettings settings) throws IOException {
         Path installer = settingPath(gameDir, settings.localInstaller, "error.validation.installerPath");
         Path mmc = settingPath(gameDir, settings.localMmcPack, "error.validation.mmcPath");
         if (installer != null && mmc != null) throw invalid("error.validation.multiplePackages");
         if (installer != null) validateArchive(installer, false);
         if (mmc != null) validateArchive(mmc, true);
+        return mmc == null ? installer : mmc;
+    }
+
+    private static Properties packOptions(Path gameDir, LaunchSettings settings, boolean local) throws IOException {
         Properties pack = new Properties();
-        if (installer == null && mmc == null) {
+        if (!local) {
             String release = PackSettings.releaseVersion(settings.releaseVersion);
             if (!PackSettings.DEFAULT_VERSION.equals(release) && !cachedReleases(gameDir).contains(release)) {
                 throw invalid("error.validation.pack.releaseVersion");
@@ -359,15 +448,71 @@ final class RelaunchOrchestrator {
             }
             pack.setProperty(PackSettings.LIBRARIES_DIRECTORY, libraries.toString());
         }
-        List<String> options = JvmOptions.resolve(settings.xms, settings.xmx, settings.jvmArgs, inherited);
-        try {
-            if (java == null || optionProbe.accepts(java, gameDir, options)) {
-                return new ValidatedSettings(java, mmc == null ? installer : mmc, pack, options, settings, save);
-            }
-        } catch (IOException error) {
-            throw invalid("error.validation.jvmProbe", error);
+        return pack;
+    }
+
+    private InstalledPack installPack(Path gameDir, int minimumJava, LaunchSettings settings, InstallRequest request,
+                                      Consumer<InstallProgress> progress) throws IOException, InterruptedException {
+        progress.accept(new InstallProgress("verify", 0, 0));
+        Path java = validateJava(gameDir, settings.javaExecutable, minimumJava);
+        if (request.kind != InstallRequest.Kind.ONLINE && request.selection.isEmpty()) {
+            throw invalid("install.error.selectLocal");
         }
-        throw invalid("error.validation.jvmRejected");
+        LaunchSettings selected = settings.withSource(request);
+        Path archive = validateSource(gameDir, selected);
+        Properties pack = packOptions(gameDir, selected, archive != null);
+        Path root = RelaunchPaths.directory(gameDir, ".outlands-relauncher");
+        Path runs = RelaunchPaths.directory(root, "runs");
+        Path cache = RelaunchPaths.directory(root, "cache");
+        try (ManagedPack staged = archive == null ? null : ManagedPack.stage(gameDir, archive.toRealPath());
+             Run run = new Run(Files.createTempDirectory(runs, "install-"))) {
+            Path bootstrap = extract(run.dir, "bootstrap.jar");
+            Path gson = extract(run.dir, "gson.jar");
+            writePackOptions(run.dir, pack);
+            ProcessBuilder command = prepareCommand(java, gameDir, cache, run.dir, bootstrap, gson,
+                    staged == null ? null : staged.path());
+            List<String> argv = new ArrayList<>(command.command());
+            argv.add("--install");
+            command.command(argv);
+            Process prepare = run.start(command);
+            int status;
+            InstallProgress previous = null;
+            try (OutputStream parentPipe = prepare.getOutputStream()) {
+                while (!prepare.waitFor(150, TimeUnit.MILLISECONDS)) {
+                    InstallProgress next = InstallProgress.read(run.dir);
+                    if (next != null && !next.matches(previous)) {
+                        progress.accept(next);
+                        previous = next;
+                    }
+                }
+                status = prepare.exitValue();
+            }
+            if (status != 0) {
+                diagnostic("Outlands installation preparation exited with code " + status + ".");
+                if (status == PackSettings.INVALID_LOCAL_PACK_EXIT && archive != null) {
+                    throw invalid(request.kind == InstallRequest.Kind.MMC
+                            ? "error.validation.mmcUnreadable" : "error.validation.installerUnreadable");
+                }
+                throw invalid("install.error.prepare");
+            }
+            RelaunchPaths.requireFile(run.dir.resolve("java.args"));
+            String version = InstalledPack.preparedVersion(run.dir.resolve("launch.properties"));
+            InstallRequest source = staged == null
+                    ? new InstallRequest(InstallRequest.Kind.ONLINE, pack.getProperty(PackSettings.RELEASE_VERSION))
+                    : new InstallRequest(request.kind, gameDir.relativize(staged.path()).toString());
+            progress.accept(new InstallProgress("save", 0, 0));
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+            InstalledPack result = new InstalledPack(version, source);
+            result.save(gameDir);
+            if (staged != null) staged.retain();
+            return result;
+        }
+    }
+
+    private static void writePackOptions(Path run, Properties options) throws IOException {
+        try (OutputStream output = Files.newOutputStream(run.resolve(PackSettings.FILE_NAME))) {
+            options.store(output, null);
+        }
     }
 
     private static void checkPreviouslySelectedRelease(Path gameDir, LaunchSettings settings) throws InterruptedException {
@@ -479,6 +624,7 @@ final class RelaunchOrchestrator {
         final List<String> options;
         final LaunchSettings selected;
         final boolean save;
+        InstalledPack installation;
 
         ValidatedSettings(Path java, Path archive, Properties packOptions, List<String> options, LaunchSettings selected,
                           boolean save) {

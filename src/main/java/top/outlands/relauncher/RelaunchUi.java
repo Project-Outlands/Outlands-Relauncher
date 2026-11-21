@@ -20,7 +20,6 @@ import java.awt.event.WindowEvent;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
-import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -28,10 +27,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import javax.swing.BorderFactory;
-import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
-import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFileChooser;
@@ -48,8 +45,6 @@ import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.UIManager;
 import javax.swing.UnsupportedLookAndFeelException;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
 import javax.swing.filechooser.FileNameExtensionFilter;
 
 import com.formdev.flatlaf.FlatDarkLaf;
@@ -58,9 +53,9 @@ import com.formdev.flatlaf.util.UIScale;
 
 import top.outlands.relauncher.RelaunchMessages.Message;
 import top.outlands.relauncher.RelaunchOrchestrator.AuthorSettingsSaver;
+import top.outlands.relauncher.RelaunchOrchestrator.InstallAccess;
 import top.outlands.relauncher.RelaunchOrchestrator.JavaSelectionValidator;
 import top.outlands.relauncher.RelaunchOrchestrator.ReleaseChoices;
-import top.outlands.relauncher.shared.PackSettings;
 
 final class RelaunchUi implements RelaunchOrchestrator.Interaction {
     @Override
@@ -71,13 +66,14 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
     @Override
     public LaunchSettings configure(LaunchSettings initial, Message initialError,
             RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator,
-            PackAuthorSettings policy, AuthorSettingsSaver authorSaver, ReleaseChoices releases) throws InterruptedException {
+            PackAuthorSettings policy, AuthorSettingsSaver authorSaver, ReleaseChoices releases,
+            InstallAccess installation) throws InterruptedException {
         if (!canConfigure()) {
             return null;
         }
         RelaunchMessages messages = RelaunchMessages.display();
         return showModal(() -> new SettingsDialog(messages, initial, initialError, validator, javaValidator,
-                policy, authorSaver, releases), dialog -> dialog.result);
+                policy, authorSaver, releases, installation), dialog -> dialog.result);
     }
 
     @Override
@@ -176,11 +172,11 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final PackAuthorSettings openingPolicy;
         private PackAuthorSettings authorSettings;
         private final JTextField javaPath = field("javaExecutable", 28);
-        private final JTextField localPackage = field("localOutlandsPackage", 28);
-        private final JComboBox<String> releaseVersion = new JComboBox<>();
-        private final JButton refreshReleases;
-        private final JLabel releaseNote = new JLabel();
+        private final JLabel outlandsStatus = new JLabel();
+        private final JButton installButton = new JButton();
         private final ReleaseChoices releases;
+        private final InstallAccess installation;
+        private InstalledPack installed;
         private final JTextField proxy = field("proxy", 28);
         private final JTextField mavenMirror = field("mavenMirror", 28);
         private final JTextField librariesDirectory = field("librariesDirectory", 28);
@@ -193,36 +189,31 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final JButton forge;
         private final JToggleButton advancedToggle;
         private final JButton browseJava;
-        private final JButton browsePackage;
         private final JButton browseLibraries;
         private final JButton clearLibraries;
         private final JButton authorButton;
         private final RelaunchOrchestrator.SettingsValidator validator;
         private SwingWorker<Void, Void> validation;
-        private SwingWorker<List<String>, Void> releaseRefresh;
-        private boolean attemptedReleaseRefresh;
-        private String releasesMessage = "help.release";
         private Dimension sizeBeforeAdvanced;
         private LaunchSettings result;
 
         SettingsDialog(RelaunchMessages messages, LaunchSettings initial, Message initialError,
                        RelaunchOrchestrator.SettingsValidator validator, JavaSelectionValidator javaValidator,
-                       PackAuthorSettings policy, AuthorSettingsSaver authorSaver, ReleaseChoices releases) {
+                       PackAuthorSettings policy, AuthorSettingsSaver authorSaver, ReleaseChoices releases,
+                       InstallAccess installation) {
             super((Frame) null, messages.text("settings.title"), Dialog.ModalityType.APPLICATION_MODAL);
             this.messages = messages;
             this.initial = initial;
             this.openingPolicy = policy;
             this.authorSettings = policy;
             this.releases = releases;
-            refreshReleases = new JButton(messages.text("button.refreshReleases"));
-            refreshReleases.setName("refreshReleases");
-            refreshReleases.addActionListener(event -> refreshReleaseChoices());
+            this.installation = installation;
+            this.installed = installation.initial;
             automatic = new JCheckBox(messages.text("settings.automatic"));
             launch = new JButton(messages.text("button.launch"));
             forge = new JButton(messages.text("button.continue"));
             advancedToggle = new JToggleButton(messages.text("advanced.show"));
             browseJava = new JButton(messages.text("button.browse"));
-            browsePackage = new JButton(messages.text("button.browse"));
             browseLibraries = new JButton(messages.text("button.browse"));
             clearLibraries = new JButton(messages.text("button.clear"));
             authorButton = new JButton(messages.text("author.title"));
@@ -243,10 +234,6 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
             javaPath.setText(initial.javaExecutable);
             javaPath.setEditable(false);
-            localPackage.setText(initial.localMmcPack.isEmpty() ? initial.localInstaller : initial.localMmcPack);
-            releaseVersion.setName("releaseVersion");
-            releaseVersion.setEditable(false);
-            replaceReleaseChoices(releases.presets, initial.releaseVersion.trim());
             proxy.setText(initial.proxy);
             mavenMirror.setText(initial.mavenMirror);
             librariesDirectory.setText(initial.librariesDirectory);
@@ -265,6 +252,11 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             addRow(basics, 1, label(messages.text("field.xms"), KeyEvent.VK_I, xms.field()), xms, null);
             addRow(basics, 2, label(messages.text("field.xmx"), KeyEvent.VK_M, xmx.field()), xmx, null);
             addNote(basics, 3, messages.text("help.heap"));
+            outlandsStatus.setName("outlandsStatus");
+            installButton.setName("installOutlands");
+            installButton.addActionListener(event -> openInstallation());
+            addRow(basics, 4, label(messages.text("install.status.label"), KeyEvent.VK_O, installButton),
+                    outlandsStatus, installButton);
             browseJava.getAccessibleContext().setAccessibleName(messages.text("access.java"));
             browseJava.addActionListener(event -> {
                 JFileChooser chooser = fileChooser("chooser.java.title", "chooser.java.filter", "exe");
@@ -275,34 +267,23 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             });
 
             JPanel advanced = new JPanel(new GridBagLayout());
-            addRow(advanced, 0, label(messages.text("field.package"), KeyEvent.VK_P, localPackage), localPackage,
-                    browsePackage);
-            addNote(advanced, 1, messages.text("help.package"));
-            addRow(advanced, 2, label(messages.text("field.release"), KeyEvent.VK_R, releaseVersion), releaseVersion,
-                    refreshReleases);
-            addNote(advanced, 3, releaseNote);
-            localPackage.getDocument().addDocumentListener(new DocumentListener() {
-                @Override public void insertUpdate(DocumentEvent event) { updateReleaseControls(); }
-                @Override public void removeUpdate(DocumentEvent event) { updateReleaseControls(); }
-                @Override public void changedUpdate(DocumentEvent event) { updateReleaseControls(); }
-            });
-            addRow(advanced, 4, label(messages.text("field.proxy"), KeyEvent.VK_U, proxy), proxy, null);
-            addNote(advanced, 5, messages.text("help.proxy"));
-            addRow(advanced, 6, label(messages.text("field.mirror"), KeyEvent.VK_V, mavenMirror), mavenMirror, null);
-            addNote(advanced, 7, messages.text("help.mirror"));
+            addRow(advanced, 0, label(messages.text("field.proxy"), KeyEvent.VK_U, proxy), proxy, null);
+            addNote(advanced, 1, messages.text("help.proxy"));
+            addRow(advanced, 2, label(messages.text("field.mirror"), KeyEvent.VK_V, mavenMirror), mavenMirror, null);
+            addNote(advanced, 3, messages.text("help.mirror"));
             JPanel libraryButtons = new JPanel(new BorderLayout(ROW_COLUMN_GAP, 0));
             libraryButtons.add(browseLibraries, BorderLayout.LINE_START);
             libraryButtons.add(clearLibraries, BorderLayout.LINE_END);
-            addRow(advanced, 8, label(messages.text("field.libraries"), KeyEvent.VK_D, librariesDirectory), librariesDirectory,
+            addRow(advanced, 4, label(messages.text("field.libraries"), KeyEvent.VK_D, librariesDirectory), librariesDirectory,
                     libraryButtons);
-            addNote(advanced, 9, messages.text("help.libraries"));
-            addRow(advanced, 10, label(messages.text("field.options"), KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
-            addNote(advanced, 11, messages.text(policy.lockJvmArguments ? "author.jvmLocked" : "help.options"));
+            addNote(advanced, 5, messages.text("help.libraries"));
+            addRow(advanced, 6, label(messages.text("field.options"), KeyEvent.VK_E, jvmArgs), new JScrollPane(jvmArgs), null);
+            addNote(advanced, 7, messages.text(policy.lockJvmArguments ? "author.jvmLocked" : "help.options"));
             JPanel authorActions = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
             authorActions.add(authorButton);
             GridBagConstraints authorRow = new GridBagConstraints();
             authorRow.gridx = 0;
-            authorRow.gridy = 12;
+            authorRow.gridy = 8;
             authorRow.gridwidth = GridBagConstraints.REMAINDER;
             authorRow.anchor = GridBagConstraints.LINE_START;
             authorRow.insets = new Insets(UIScale.scale(8), 0, 0, 0);
@@ -313,9 +294,6 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0)));
             jvmArgs.setFocusTraversalKeys(KeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS,
                     Collections.singleton(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, KeyEvent.SHIFT_DOWN_MASK)));
-            browsePackage.getAccessibleContext().setAccessibleName(messages.text("access.package"));
-            browsePackage.addActionListener(event -> browse(localPackage, "chooser.package.title",
-                    "chooser.package.filter", "zip", "jar"));
             browseLibraries.getAccessibleContext().setAccessibleName(messages.text("access.libraries.browse"));
             browseLibraries.addActionListener(event -> {
                 JFileChooser chooser = createChooser(messages);
@@ -342,9 +320,6 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                 options.revalidate();
                 options.repaint();
                 resizeForAdvancedSettings(expanded);
-                if (expanded && !attemptedReleaseRefresh && localPackage.getText().trim().isEmpty()) {
-                    refreshReleaseChoices();
-                }
             });
 
             JPanel body = new JPanel(new BorderLayout(0, 8));
@@ -423,10 +398,6 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     (bounds.height - insets.top - insets.bottom) * 4 / 5);
         }
 
-        private void browse(JTextField field, String title, String description, String... extensions) {
-            choosePath(field, fileChooser(title, description, extensions));
-        }
-
         private JFileChooser fileChooser(String title, String description, String... extensions) {
             JFileChooser chooser = createChooser(messages);
             chooser.setDialogTitle(messages.text(title));
@@ -494,22 +465,37 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             }
         }
 
-        private void validateSettings() {
-            if (validation != null) {
+        private void openInstallation() {
+            if (!installButton.isEnabled()) return;
+            if (javaPath.getText().trim().isEmpty()) {
+                showStatus(messages.text("install.selectJava"));
+                browseJava.requestFocusInWindow();
                 return;
             }
+            InstallRequest suggestion = installed == null ? installation.suggested : installed.source;
+            InstallationDialog dialog = new InstallationDialog(this, messages, readSettings(), releases,
+                    installation, suggestion, openingPolicy.lockAdvanced);
+            dialog.setVisible(true);
+            if (dialog.result() != null && isDisplayable()) {
+                installed = dialog.result();
+                showStatus("");
+                updateInstallationControls(true);
+            }
+        }
+
+        private LaunchSettings readSettings() {
             boolean locked = openingPolicy.lockAdvanced;
-            String packagePath = localPackage.getText().trim();
-            boolean mmcPack = packagePath.toLowerCase(Locale.ROOT).endsWith(".zip");
-            String installer = locked ? initial.localInstaller : (mmcPack ? "" : packagePath);
-            String mmc = locked ? initial.localMmcPack : (mmcPack ? packagePath : "");
             String extra = locked || openingPolicy.lockJvmArguments ? initial.jvmArgs : jvmArgs.getText();
-            LaunchSettings candidate = new LaunchSettings(javaPath.getText(), installer,
-                    xms.field().getText(), xmx.field().getText(), extra, automatic.isSelected(), mmc,
-                    locked ? initial.releaseVersion : (packagePath.isEmpty() ? selectedRelease() : ""),
-                    locked ? initial.proxy : proxy.getText().trim(),
+            return new LaunchSettings(javaPath.getText(), initial.localInstaller,
+                    xms.field().getText(), xmx.field().getText(), extra, automatic.isSelected(), initial.localMmcPack,
+                    initial.releaseVersion, locked ? initial.proxy : proxy.getText().trim(),
                     locked ? initial.mavenMirror : mavenMirror.getText().trim(),
                     locked ? initial.librariesDirectory : librariesDirectory.getText());
+        }
+
+        private void validateSettings() {
+            if (validation != null || installed == null) return;
+            LaunchSettings candidate = readSettings().withSource(installed.source);
             validateAsync("validation.checking", () -> validator.validate(candidate), () -> {
                 result = candidate;
                 dispose();
@@ -555,63 +541,28 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private void setEditing(boolean enabled) {
             xms.setInputEnabled(enabled);
             xmx.setInputEnabled(enabled);
-            for (JComponent component : new JComponent[] {javaPath, automatic, browseJava, launch}) {
+            for (JComponent component : new JComponent[] {javaPath, automatic, browseJava}) {
                 component.setEnabled(enabled);
             }
             boolean advancedEditable = enabled && !openingPolicy.lockAdvanced;
-            for (JComponent component : new JComponent[] {advancedToggle, localPackage, proxy,
-                    mavenMirror, librariesDirectory, browsePackage, browseLibraries, clearLibraries, authorButton}) {
+            for (JComponent component : new JComponent[] {advancedToggle, proxy,
+                    mavenMirror, librariesDirectory, browseLibraries, clearLibraries, authorButton}) {
                 component.setEnabled(advancedEditable);
             }
             jvmArgs.setEnabled(advancedEditable && !openingPolicy.lockJvmArguments);
-            updateReleaseControls();
+            updateInstallationControls(enabled);
         }
 
-        private String selectedRelease() {
-            return (String) releaseVersion.getSelectedItem();
-        }
-
-        private void replaceReleaseChoices(List<String> versions, String selected) {
-            releaseVersion.setModel(new DefaultComboBoxModel<>(versions.toArray(new String[0])));
-            releaseVersion.setSelectedItem(versions.contains(selected) ? selected : PackSettings.DEFAULT_VERSION);
-        }
-
-        private void updateReleaseControls() {
-            boolean local = !localPackage.getText().trim().isEmpty();
-            boolean enabled = !local && !openingPolicy.lockAdvanced && validation == null;
-            releaseVersion.setEnabled(enabled);
-            refreshReleases.setEnabled(enabled && releaseRefresh == null);
-            releaseNote.setText(messages.text(local ? "help.releaseLocal" : releasesMessage));
-        }
-
-        private void refreshReleaseChoices() {
-            if (!refreshReleases.isEnabled()) return;
-            attemptedReleaseRefresh = true;
-            releasesMessage = "help.releaseLoading";
-            String proxySetting = proxy.getText();
-            releaseRefresh = new SwingWorker<List<String>, Void>() {
-                @Override protected List<String> doInBackground() throws IOException, InterruptedException {
-                    return releases.loader.refresh(proxySetting);
-                }
-
-                @Override protected void done() {
-                    if (releaseRefresh != this || isCancelled()) return;
-                    releaseRefresh = null;
-                    try {
-                        replaceReleaseChoices(get(), selectedRelease());
-                        releasesMessage = "help.release";
-                    } catch (ExecutionException failed) {
-                        releasesMessage = "help.releaseOffline";
-                        RelaunchOrchestrator.diagnostic("Could not refresh the Outlands release presets.");
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        releasesMessage = "help.releaseOffline";
-                    }
-                    updateReleaseControls();
-                }
-            };
-            updateReleaseControls();
-            releaseRefresh.execute();
+        private void updateInstallationControls(boolean editing) {
+            boolean present = installed != null;
+            outlandsStatus.setText(present
+                    ? messages.text("install.status.installed", installed.version,
+                            InstallationDialog.sourceLabel(messages, installed.source.kind))
+                    : messages.text("install.status.missing"));
+            outlandsStatus.setToolTipText(present ? installed.source.selection : null);
+            installButton.setText(messages.text(present ? "install.button.change" : "install.button.install"));
+            installButton.setEnabled(editing && (!present || !openingPolicy.lockAdvanced));
+            launch.setEnabled(editing && present);
         }
 
         private void showStatus(String message) {
@@ -621,10 +572,6 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
 
         @Override
         public void dispose() {
-            if (releaseRefresh != null) {
-                releaseRefresh.cancel(true);
-                releaseRefresh = null;
-            }
             if (validation != null) {
                 SwingWorker<Void, Void> pending = validation;
                 validation = null;

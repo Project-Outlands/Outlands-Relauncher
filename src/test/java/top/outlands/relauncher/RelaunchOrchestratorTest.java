@@ -301,6 +301,92 @@ class RelaunchOrchestratorTest {
     }
 
     @Test
+    void installPreparesWithoutSessionAndAFailedChangeKeepsThePreviousInstallation() throws Exception {
+        List<String> phases = new ArrayList<>();
+        int[] attempts = {0};
+        RelaunchOrchestrator launcher = launcher(builder -> {
+            List<String> command = builder.command();
+            assertEquals("--install", command.get(8));
+            Path run = prepare(command);
+            assertFalse(Files.exists(run.resolve("jvm-options.txt")), "Installation is independent of extra JVM options");
+            Files.write(run.resolve("launch.properties"),
+                    "version=1.12.2-Outlands-fixture\n".getBytes(StandardCharsets.US_ASCII));
+            Files.write(run.resolve("install-progress"), "dependencies 1 3\n".getBytes(StandardCharsets.US_ASCII));
+            FakeProcess prepare = new FakeProcess(attempts[0]++ == 0 ? 0 : 1, new ArrayList<>(), false);
+            prepare.timedPollsUntilExit = 1;
+            return prepare;
+        }, () -> fail("Installation must not release Forge logging"));
+        ui.selection = (initial, error, validator) -> {
+            assertNull(ui.installation.initial);
+            LaunchSettings settings = new LaunchSettings("java home/bin/java.exe", "", "", "", "-javaagent:bad", false);
+            InstallRequest request = new InstallRequest(InstallRequest.Kind.JAR, installer.toString());
+            InstalledPack installed = assertDoesNotThrow(() -> ui.installation.install(settings, request,
+                    progress -> phases.add(progress.phase)));
+            assertEquals("fixture", installed.version);
+            assertEquals(InstallRequest.Kind.JAR, installed.source.kind);
+            Path copy = instance.resolve(installed.source.selection);
+            assertDoesNotThrow(() -> assertStagedPack(installer, copy));
+            assertFalse(Files.exists(config), "Installation saves its own record, not launch preferences");
+            IOException failed = assertThrows(IOException.class, () -> ui.installation.install(settings, request, progress -> {}));
+            assertTrue(failed.getMessage().contains("Could not prepare Outlands"));
+            InstalledPack retained = assertDoesNotThrow(() -> InstalledPack.read(instance));
+            assertTrue(installed.source.matches(retained.source));
+            assertDoesNotThrow(() -> Files.delete(installer));
+            assertTrue(Files.isRegularFile(copy));
+            return null; // Continue in Forge, even after a successful installation.
+        };
+        assertNull(launcher.launch(instance, dir -> fail("Installation must not capture a Minecraft session")));
+        assertEquals(Arrays.asList("verify", "dependencies", "save"), phases);
+        assertEquals(2, attempts[0]);
+        assertRunsEmpty();
+        try (Stream<Path> entries = Files.list(instance.resolve("outlands"))) {
+            assertEquals(2, entries.count(), "Only the active archive and installation record should remain");
+        }
+        ui.selection = (initial, error, validator) -> {
+            assertNull(error);
+            assertEquals("fixture", ui.installation.initial.version);
+            assertEquals(ui.installation.initial.source.selection, initial.localInstaller);
+            return null;
+        };
+        assertNull(launcher.launch(instance, dir -> fail("No game was requested")));
+    }
+
+    @Test
+    void onlineInstallationOverridesTheOldLaunchSourceOnNextAutomaticLaunch() throws Exception {
+        writeConfig("ask");
+        RelaunchOrchestrator install = launcher(builder -> {
+            List<String> command = builder.command();
+            assertEquals("", command.get(6));
+            assertEquals("--install", command.get(8));
+            Path run = prepare(command);
+            Files.write(run.resolve("launch.properties"), ("version=1.12.2-Outlands-" + PackSettings.DEFAULT_VERSION
+                    + "\n").getBytes(StandardCharsets.US_ASCII));
+            FakeProcess completed = new FakeProcess(0, new ArrayList<>(), false);
+            completed.alive = false;
+            return completed;
+        }, () -> fail("Installation must not release Forge logging"));
+        ui.selection = (initial, error, validator) -> {
+            InstalledPack receipt = assertDoesNotThrow(() -> ui.installation.install(initial,
+                    new InstallRequest(InstallRequest.Kind.ONLINE, PackSettings.DEFAULT_VERSION), progress -> {}));
+            assertEquals(PackSettings.DEFAULT_VERSION, receipt.version);
+            return null;
+        };
+        assertNull(install.launch(instance, dir -> fail("No game was requested")));
+        writeConfig("auto"); // Intentionally keep the legacy JAR path in the config.
+        Files.delete(installer);
+        RelaunchOrchestrator launch = launcher(builder -> {
+            if (builder.command().get(1).equals("-cp")) {
+                assertEquals("", builder.command().get(6));
+                assertEquals(8, builder.command().size());
+                prepare(builder.command());
+            }
+            return new FakeProcess(0, new ArrayList<>(), false);
+        }, () -> {});
+        assertEquals(Integer.valueOf(0), launch.launch(instance, dir -> metadata -> stdin -> {}));
+        assertEquals(1, ui.configurations);
+    }
+
+    @Test
     void successfulLocalPacksMigrateAndRelaunchWithoutOriginalFiles() throws Exception {
         Path mmc = instance.resolve("installers/local.zip");
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(mmc))) {
@@ -660,6 +746,7 @@ class RelaunchOrchestratorTest {
         PackAuthorSettings policy;
         RelaunchOrchestrator.JavaSelectionValidator javaValidator;
         RelaunchOrchestrator.AuthorSettingsSaver authorSaver;
+        RelaunchOrchestrator.InstallAccess installation;
         int configurations;
         Selection selection = (initial, error, validator) -> {
             validate(validator, initial);
@@ -671,13 +758,14 @@ class RelaunchOrchestratorTest {
         @Override public LaunchSettings configure(LaunchSettings initial, RelaunchMessages.Message initialError,
                 RelaunchOrchestrator.SettingsValidator validator, RelaunchOrchestrator.JavaSelectionValidator javaValidator,
                 PackAuthorSettings policy, RelaunchOrchestrator.AuthorSettingsSaver saveAuthorSettings,
-                RelaunchOrchestrator.ReleaseChoices releases)
+                RelaunchOrchestrator.ReleaseChoices releases, RelaunchOrchestrator.InstallAccess installation)
                 throws InterruptedException {
             assertTrue(configurable, "Headless launch must not open settings");
             configurations++;
             this.policy = policy;
             this.javaValidator = javaValidator;
             this.authorSaver = saveAuthorSettings;
+            this.installation = installation;
             return selection.select(initial, initialError == null ? null : messages.text(initialError), validator);
         }
         @Override public void fallback(RelaunchMessages.Message reason) { fallbacks.add(messages.text(reason)); }
@@ -691,6 +779,7 @@ class RelaunchOrchestratorTest {
         boolean alive = true;
         boolean destroyed;
         boolean interruptWait;
+        int timedPollsUntilExit = -1;
 
         FakeProcess(int status, List<String> events, boolean game) {
             this.status = status;
@@ -707,7 +796,10 @@ class RelaunchOrchestratorTest {
         @Override public boolean isAlive() { return alive; }
         @Override public int exitValue() { return status; }
         @Override public void destroy() { destroyed = true; alive = false; }
-        @Override public boolean waitFor(long timeout, TimeUnit unit) { return !alive; }
+        @Override public boolean waitFor(long timeout, TimeUnit unit) {
+            if (timedPollsUntilExit >= 0 && timedPollsUntilExit-- == 0) alive = false;
+            return !alive;
+        }
         @Override public int waitFor() throws InterruptedException {
             if (interruptWait) throw new InterruptedException();
             if (game) events.add("wait-game");
