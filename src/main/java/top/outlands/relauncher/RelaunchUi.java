@@ -243,9 +243,9 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             addNote(advanced, 5, messages.text("help.proxy"));
             addRow(advanced, 6, label(messages.text("field.mirror"), KeyEvent.VK_V, mavenMirror), mavenMirror, null);
             addNote(advanced, 7, messages.text("help.mirror"));
-            JPanel libraryButtons = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
-            libraryButtons.add(browseLibraries);
-            libraryButtons.add(clearLibraries);
+            JPanel libraryButtons = new JPanel(new BorderLayout(UIScale.scale(8), 0));
+            libraryButtons.add(browseLibraries, BorderLayout.LINE_START);
+            libraryButtons.add(clearLibraries, BorderLayout.LINE_END);
             addRow(advanced, 8, label(messages.text("field.libraries"), KeyEvent.VK_D, librariesDirectory), librariesDirectory,
                     libraryButtons);
             addNote(advanced, 9, messages.text("help.libraries"));
