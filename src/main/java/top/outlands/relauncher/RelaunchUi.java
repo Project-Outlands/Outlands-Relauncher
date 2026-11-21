@@ -158,7 +158,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
     }
 
     @SuppressWarnings("serial")
-    private static final class SettingsDialog extends JDialog {
+    static final class SettingsDialog extends JDialog {
         private final RelaunchMessages messages;
         private final JTextField javaPath = field("javaExecutable", 28);
         private final JTextField localPackage = field("localOutlandsPackage", 28);
@@ -180,6 +180,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         private final JButton clearLibraries;
         private final RelaunchOrchestrator.SettingsValidator validator;
         private SwingWorker<Void, Void> validation;
+        private Dimension sizeBeforeAdvanced;
         private LaunchSettings result;
 
         SettingsDialog(RelaunchMessages messages, LaunchSettings initial, Message initialError,
@@ -283,16 +284,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                 advanced.setVisible(expanded);
                 options.revalidate();
                 options.repaint();
-                if (expanded) {
-                    Dimension preferred = getPreferredSize();
-                    Dimension limit = screenSizeLimit();
-                    int width = Math.max(getWidth(), Math.min(preferred.width, limit.width));
-                    int height = Math.max(getHeight(), Math.min(preferred.height, limit.height));
-                    if (width != getWidth() || height != getHeight()) {
-                        setSize(width, height);
-                        setLocationRelativeTo(null);
-                    }
-                }
+                resizeForAdvancedSettings(expanded);
             });
 
             JPanel body = new JPanel(new BorderLayout(0, 8));
@@ -343,6 +335,23 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             setSize(Math.min(getWidth(), limit.width), Math.min(getHeight(), limit.height));
             setMinimumSize(new Dimension(Math.min(getWidth(), 440), Math.min(getHeight(), 300)));
             setLocationRelativeTo(null);
+        }
+
+        private void resizeForAdvancedSettings(boolean expanded) {
+            Dimension current = getSize();
+            Dimension target = sizeBeforeAdvanced;
+            if (expanded) {
+                // Capture the current compact size, including any manual resize since the last toggle.
+                sizeBeforeAdvanced = current;
+                Dimension preferred = getPreferredSize();
+                Dimension limit = screenSizeLimit();
+                target = new Dimension(Math.max(current.width, Math.min(preferred.width, limit.width)),
+                        Math.max(current.height, Math.min(preferred.height, limit.height)));
+            }
+            if (!current.equals(target)) {
+                setSize(target);
+                setLocationRelativeTo(null);
+            }
         }
 
         private Dimension screenSizeLimit() {
