@@ -49,6 +49,7 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 
 import com.formdev.flatlaf.FlatDarkLaf;
 import com.formdev.flatlaf.FlatSystemProperties;
+import com.formdev.flatlaf.util.UIScale;
 
 import top.outlands.relauncher.RelaunchMessages.Message;
 import top.outlands.relauncher.shared.PackSettings;
@@ -452,7 +453,10 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             constraints.gridx = 0;
             constraints.gridy = row;
             constraints.anchor = GridBagConstraints.FIRST_LINE_START;
-            constraints.insets = new Insets(3, 0, 3, 8);
+            // Keep each help note close to its field; put the extra space above the next field.
+            int top = UIScale.scale(row == 0 ? 3 : 10);
+            int bottom = UIScale.scale(3);
+            constraints.insets = new Insets(top, 0, bottom, 8);
             panel.add(label, constraints);
             constraints.gridx = 1;
             constraints.weightx = 1;
@@ -462,7 +466,7 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                 constraints.gridx = 2;
                 constraints.weightx = 0;
                 constraints.fill = GridBagConstraints.NONE;
-                constraints.insets = new Insets(3, 0, 3, 0);
+                constraints.insets = new Insets(top, 0, bottom, 0);
                 panel.add(browse, constraints);
             }
         }
