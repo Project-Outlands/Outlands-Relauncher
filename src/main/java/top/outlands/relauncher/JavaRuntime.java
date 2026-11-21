@@ -10,24 +10,24 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import top.outlands.relauncher.shared.JavaArgFile;
+import top.outlands.relauncher.shared.LaunchPlatform;
 
 final class JavaRuntime {
     private JavaRuntime() {}
 
-    static boolean isX64(String arch) {
-        return "amd64".equalsIgnoreCase(arch) || "x86_64".equalsIgnoreCase(arch)
-                || "x64".equalsIgnoreCase(arch);
-    }
-
-    static boolean isWindowsX64(String os, String arch) {
-        return os.toLowerCase(Locale.ROOT).startsWith("windows") && isX64(arch);
+    /** Tests a basename only; filesystem and version checks are performed by probe. */
+    static boolean isJavaExecutableName(String name, LaunchPlatform platform) {
+        if (platform == null) {
+            return false;
+        }
+        return platform.windows() ? "java.exe".equalsIgnoreCase(name) || "javaw.exe".equalsIgnoreCase(name)
+                : "java".equals(name);
     }
 
     static ProcessBuilder command(Path gameDir, List<String> argv) {
@@ -40,14 +40,10 @@ final class JavaRuntime {
 
     static boolean probe(Path java, Path gameDir, int minimumJava) throws InterruptedException {
         if (!java.isAbsolute() || !Files.isRegularFile(java)
-                || !"java.exe".equalsIgnoreCase(java.getFileName().toString())) {
+                || !isJavaExecutableName(java.getFileName().toString(), LaunchPlatform.current())) {
             return false;
         }
-        List<String> argv = new ArrayList<>();
-        argv.add(java.toString());
-        argv.add("-XshowSettings:properties");
-        argv.add("-version");
-        String output = probeOutput(gameDir, argv);
+        String output = probeOutput(gameDir, Arrays.asList(java.toString(), "-XshowSettings:properties", "-version"));
         return output != null && matchesProbe(output, minimumJava);
     }
 
@@ -122,7 +118,8 @@ final class JavaRuntime {
                 arch = value;
             }
         }
-        if (!isX64(arch) || !version.matches("[0-9]+")) {
+        LaunchPlatform runtimePlatform = LaunchPlatform.detect(System.getProperty("os.name", ""), arch, "");
+        if (runtimePlatform == null || !version.matches("[0-9]+")) {
             return false;
         }
         try {

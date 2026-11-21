@@ -1,5 +1,6 @@
 package top.outlands.relauncher;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Locale;
@@ -8,14 +9,17 @@ import javax.swing.JFileChooser;
 import javax.swing.LookAndFeel;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
+import javax.swing.filechooser.FileFilter;
 
 import com.formdev.flatlaf.FlatDarkLaf;
 import org.junit.jupiter.api.Test;
 
 import top.outlands.relauncher.shared.JvmOptions;
+import top.outlands.relauncher.shared.LaunchPlatform;
 import top.outlands.relauncher.shared.PackSettings;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,6 +56,23 @@ class RelaunchMessagesTest {
                 chinese.text(RelaunchMessages.validation(version)));
         assertEquals("无法检查启动设置，请核对输入后重试。",
                 chinese.text(RelaunchMessages.validation(new IOException("Private input"))));
+    }
+
+    @Test
+    void javaChooserFiltersTheExecutableNamesOfEachPlatform() {
+        RelaunchMessages messages = new RelaunchMessages(Locale.ENGLISH);
+        FileFilter win = RelaunchUi.javaFileFilter(messages, LaunchPlatform.detect("Windows 11", "amd64", "10.0"));
+        assertTrue(win.accept(new File("java.exe")));
+        assertTrue(win.accept(new File("javaw.exe")));
+        assertTrue(win.accept(new File(".")));
+        assertFalse(win.accept(new File("javac.exe")));
+        for (String os : new String[] {"Linux", "Mac OS X"}) {
+            FileFilter unix = RelaunchUi.javaFileFilter(messages, LaunchPlatform.detect(os, "arm64", ""));
+            assertTrue(unix.accept(new File("java")));
+            assertTrue(unix.accept(new File(".")));
+            assertFalse(unix.accept(new File("javaw.exe")));
+            assertFalse(unix.accept(new File("javac")));
+        }
     }
 
     @Test

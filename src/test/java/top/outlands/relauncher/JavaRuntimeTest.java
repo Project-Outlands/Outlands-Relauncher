@@ -5,8 +5,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collections;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+
+import top.outlands.relauncher.shared.LaunchPlatform;
 
 class JavaRuntimeTest {
     @TempDir Path instance;
@@ -31,17 +34,38 @@ class JavaRuntimeTest {
     }
 
     @Test
-    void requiresX64RuntimeArchitecture() {
-        assertFalse(JavaRuntime.matchesProbe("java.specification.version=25\nos.arch=aarch64", 25));
+    void requiresSupportedRuntimeArchitecture() {
+        assertTrue(JavaRuntime.matchesProbe("java.specification.version=25\nos.arch=aarch64", 25));
+        assertTrue(JavaRuntime.matchesProbe("java.specification.version=25\nos.arch=arm64", 25));
         assertFalse(JavaRuntime.matchesProbe("java.specification.version=26\nos.arch=x86", 25));
         assertFalse(JavaRuntime.matchesProbe("java.specification.version=25", 25));
     }
 
     @Test
-    void requiresWindowsX64ForNativeSupport() {
-        assertTrue(JavaRuntime.isWindowsX64("Windows 11", "amd64"));
-        assertFalse(JavaRuntime.isWindowsX64("Windows 11", "aarch64"));
-        assertFalse(JavaRuntime.isWindowsX64("Linux", "amd64"));
+    void acceptsOnlyJavaLauncherBasenamesForTheHostPlatform() {
+        LaunchPlatform windows = LaunchPlatform.detect("Windows 11", "amd64", "10.0");
+        LaunchPlatform linux = LaunchPlatform.detect("Linux", "x86_64", "6.0");
+        LaunchPlatform mac = LaunchPlatform.detect("Mac OS X", "aarch64", "15.0");
+        assertTrue(JavaRuntime.isJavaExecutableName("java.exe", windows));
+        assertTrue(JavaRuntime.isJavaExecutableName("JAVAW.EXE", windows));
+        assertFalse(JavaRuntime.isJavaExecutableName("java", windows));
+        assertFalse(JavaRuntime.isJavaExecutableName("javac.exe", windows));
+        assertFalse(JavaRuntime.isJavaExecutableName("bin/javaw.exe", windows));
+        for (LaunchPlatform platform : new LaunchPlatform[] {linux, mac}) {
+            assertTrue(JavaRuntime.isJavaExecutableName("java", platform));
+            assertFalse(JavaRuntime.isJavaExecutableName("JAVA", platform));
+            assertFalse(JavaRuntime.isJavaExecutableName("java.exe", platform));
+            assertFalse(JavaRuntime.isJavaExecutableName("javaw.exe", platform));
+        }
+        assertFalse(JavaRuntime.isJavaExecutableName(null, windows));
+        assertFalse(JavaRuntime.isJavaExecutableName("java", null));
+    }
+
+    @Test
+    void launchesTheExactSelectedJavawPath() {
+        Path javaw = instance.resolve("java home").resolve("bin").resolve("JAVAW.EXE");
+        ProcessBuilder game = RelaunchOrchestrator.gameCommand(javaw, instance, instance.resolve("launch.args"));
+        assertEquals(javaw.toString(), game.command().get(0));
     }
 
     @Test

@@ -45,13 +45,14 @@ import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.UIManager;
 import javax.swing.UnsupportedLookAndFeelException;
-import javax.swing.filechooser.FileNameExtensionFilter;
+import javax.swing.filechooser.FileFilter;
 
 import com.formdev.flatlaf.FlatDarkLaf;
 import com.formdev.flatlaf.FlatSystemProperties;
 import com.formdev.flatlaf.util.UIScale;
 
 import top.outlands.relauncher.RelaunchMessages.Message;
+import top.outlands.relauncher.shared.LaunchPlatform;
 import top.outlands.relauncher.RelaunchOrchestrator.AuthorSettingsSaver;
 import top.outlands.relauncher.RelaunchOrchestrator.InstallAccess;
 import top.outlands.relauncher.RelaunchOrchestrator.JavaSelectionValidator;
@@ -163,6 +164,18 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
         return chooser;
     }
 
+    static FileFilter javaFileFilter(RelaunchMessages messages, LaunchPlatform platform) {
+        return new FileFilter() {
+            @Override public boolean accept(File file) {
+                return file.isDirectory() || JavaRuntime.isJavaExecutableName(file.getName(), platform);
+            }
+
+            @Override public String getDescription() {
+                return messages.text(platform != null && platform.windows() ? "chooser.java.filterWindows" : "chooser.java.filter");
+            }
+        };
+    }
+
     @SuppressWarnings("serial")
     static final class SettingsDialog extends JDialog {
         private static final int ROW_COLUMN_GAP = 8;
@@ -259,7 +272,10 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
                     outlandsStatus, installButton);
             browseJava.getAccessibleContext().setAccessibleName(messages.text("access.java"));
             browseJava.addActionListener(event -> {
-                JFileChooser chooser = fileChooser("chooser.java.title", "chooser.java.filter", "exe");
+                JFileChooser chooser = createChooser(messages);
+                chooser.setDialogTitle(messages.text("chooser.java.title"));
+                chooser.setAcceptAllFileFilterUsed(false);
+                chooser.setFileFilter(javaFileFilter(messages, LaunchPlatform.current()));
                 String path = selectedPath(javaPath, chooser);
                 if (path != null) {
                     validateAsync("validation.checkingJava", () -> javaValidator.validate(path), () -> javaPath.setText(path));
@@ -396,13 +412,6 @@ final class RelaunchUi implements RelaunchOrchestrator.Interaction {
             Insets insets = Toolkit.getDefaultToolkit().getScreenInsets(screen);
             return new Dimension((bounds.width - insets.left - insets.right) * 9 / 10,
                     (bounds.height - insets.top - insets.bottom) * 4 / 5);
-        }
-
-        private JFileChooser fileChooser(String title, String description, String... extensions) {
-            JFileChooser chooser = createChooser(messages);
-            chooser.setDialogTitle(messages.text(title));
-            chooser.setFileFilter(new FileNameExtensionFilter(messages.text(description), extensions));
-            return chooser;
         }
 
         private void choosePath(JTextField field, JFileChooser chooser) {
