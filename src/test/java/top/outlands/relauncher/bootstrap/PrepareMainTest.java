@@ -124,10 +124,12 @@ class PrepareMainTest {
         Path run = Files.createDirectory(root.resolve("run"));
         Path archive = Files.write(root.resolve("local.jar"), new byte[] {1, 2, 3});
         Path bootstrap = Files.createFile(root.resolve("bootstrap.jar"));
-        String[] args = {root.resolve("cache").toString(), run.toString(), archive.toString(), bootstrap.toString()};
+        String[] args = {root.resolve("cache").toString(), run.toString(), archive.toString(),
+                bootstrap.toString(), "--install"};
         assertThrows(PrepareMain.InvalidLocalPack.class,
                 () -> PrepareMain.prepare(args, uri -> { throw new AssertionError("Invalid archive must not fetch dependencies"); }, null));
         assertFalse(Files.exists(run.resolve("java.args")));
+        assertEquals("verify 0 0\n", readProgress(run));
     }
 
     @Test
@@ -155,10 +157,46 @@ class PrepareMainTest {
     }
 
     @Test
+    void installReportsPreparationProgressAndKeepsNormalLaunchOutput() throws IOException {
+        Fixture fixture = fixture(true, "hello.dll", version -> {});
+        List<String> game = Arrays.asList("--username", "${auth_player_name}", "--demo-false", "a value");
+        fixture.prepare(true, true);
+        assertEquals(Arrays.asList("verify 0 0\n", "dependencies 1 4\n", "dependencies 2 4\n", "dependencies 3 4\n"),
+                fixture.progressAtDownload);
+        assertEquals("save 0 0\n", readProgress(fixture.run));
+        fixture.assertOutput(game);
+        assertArrayEquals(new byte[] {11}, Files.readAllBytes(fixture.run.resolve("natives/hello.dll")));
+
+        fixture.offline = true;
+        fixture.prepare(true, true);
+        assertEquals(4, fixture.requests);
+        assertEquals("save 0 0\n", readProgress(fixture.run));
+        fixture.assertOutput(game);
+        assertArrayEquals(new byte[] {11}, Files.readAllBytes(fixture.run.resolve("natives/hello.dll")));
+    }
+
+    @Test
+    void installProgressWriteFailureAbortsPreparation() throws IOException {
+        Fixture fixture = fixture(true, "hello.dll", version -> {});
+        Path run = Files.createDirectory(root.resolve("blocked-progress"));
+        Files.createDirectory(run.resolve("install-progress"));
+        String[] args = {fixture.cache.toString(), run.toString(), fixture.installer.toString(),
+                fixture.bootstrap.toString(), "--install"};
+        assertThrows(IOException.class, () -> PrepareMain.prepare(args,
+                uri -> { throw new AssertionError("Progress write failure must abort preparation"); }, fixture.release));
+        assertFalse(Files.exists(run.resolve("launch.properties")));
+    }
+
+    private static String readProgress(Path run) throws IOException {
+        return new String(Files.readAllBytes(run.resolve("install-progress")), StandardCharsets.UTF_8);
+    }
+
+    @Test
     void legacyLocalInstallerUsesEmbeddedLoaderAndSplitsTemplateWithoutResolvingIt() throws IOException {
         Fixture fixture = fixture(false, "hello.dll", version -> {});
         fixture.prepare(false);
         assertEquals(3, fixture.requests);
+        assertFalse(Files.exists(fixture.run.resolve("install-progress")));
         fixture.assertOutput(Arrays.asList("--username", "${auth_player_name}", "--label", "quoted value", ""));
     }
 
@@ -180,8 +218,9 @@ class PrepareMainTest {
     void badEmbeddedLoaderCannotFallBackToItsManifestUrl() throws IOException {
         Fixture fixture = fixture(true, "hello.dll", version -> libraries(version).get(0).getAsJsonObject()
                 .getAsJsonObject("downloads").getAsJsonObject("artifact").addProperty("sha1", hash("SHA-1", CLIENT)));
-        assertThrows(IOException.class, () -> fixture.prepare(false));
+        assertThrows(IOException.class, () -> fixture.prepare(false, true));
         assertEquals(0, fixture.requests);
+        assertEquals("dependencies 0 4\n", readProgress(fixture.run));
         fixture.assertNoLaunchFiles();
     }
 
@@ -211,7 +250,8 @@ class PrepareMainTest {
     void rejectTraversalAndCaseInsensitiveNativeCollisions() throws IOException {
         for (String bad : Arrays.asList("../escaped.dll", "nested/../../escaped.dll", "C:/escaped.dll", "HELLO.DLL")) {
             Fixture fixture = fixture(true, bad, version -> {});
-            IOException error = assertThrows(IOException.class, () -> fixture.prepare(false));
+            IOException error = assertThrows(IOException.class, () -> fixture.prepare(false, true));
+            assertEquals("dependencies 4 4\n", readProgress(fixture.run));
             assertTrue(error.getMessage().contains("metadata path") || error.getMessage().contains("Duplicate"));
             assertFalse(Files.exists(fixture.run.resolve("escaped.dll")));
             assertFalse(Files.exists(fixture.run.getParent().resolve("escaped.dll")));
@@ -418,6 +458,7 @@ class PrepareMainTest {
         final Path bootstrap;
         final InstallerMetadata.Artifact release;
         final Map<URI, byte[]> artifacts = new HashMap<>();
+        final List<String> progressAtDownload = new ArrayList<>();
         Path run;
         int requests;
         boolean offline;
@@ -436,17 +477,24 @@ class PrepareMainTest {
         }
 
         void prepare(boolean pinned) throws IOException {
+            prepare(pinned, false);
+        }
+
+        void prepare(boolean pinned, boolean install) throws IOException {
             run = Files.createTempDirectory(root, "run space-").toRealPath();
             Files.write(run.resolve(JvmOptions.FILE_NAME), Arrays.asList("-Xms512m", "-Xmx4G", "-Dcustom=two words"),
                     StandardCharsets.UTF_8);
-            PrepareMain.prepare(new String[] {cache.toString(), run.toString(), pinned ? "" : installer.toString(),
-                    bootstrap.toString()}, uri -> {
-                        if (offline) throw new AssertionError("Unexpected download while offline: " + uri);
-                        requests++;
-                        byte[] bytes = artifacts.get(uri);
-                        if (bytes == null) throw new AssertionError("Unexpected download: " + uri);
-                        return new ByteArrayInputStream(bytes);
-                    }, release);
+            List<String> args = new ArrayList<>(Arrays.asList(cache.toString(), run.toString(),
+                    pinned ? "" : installer.toString(), bootstrap.toString()));
+            if (install) args.add("--install");
+            PrepareMain.prepare(args.toArray(new String[0]), uri -> {
+                if (offline) throw new AssertionError("Unexpected download while offline: " + uri);
+                if (install) progressAtDownload.add(readProgress(run));
+                requests++;
+                byte[] bytes = artifacts.get(uri);
+                if (bytes == null) throw new AssertionError("Unexpected download: " + uri);
+                return new ByteArrayInputStream(bytes);
+            }, release);
         }
 
         void assertOutput(List<String> tokens) throws IOException {

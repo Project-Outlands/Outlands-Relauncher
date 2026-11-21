@@ -35,14 +35,14 @@ public final class PrepareMain {
 
     public static void main(String[] args) {
         try {
-            require(args.length == 4,
-                    "Expected cacheDir, runDir, local MMC pack / installer (or empty), bootstrapJar");
+            boolean install = installMode(args);
             String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
             require(System.getProperty("os.name", "").startsWith("Windows")
                     && ("amd64".equals(arch) || "x86_64".equals(arch))
                     && Integer.parseInt(System.getProperty("java.specification.version", "0")) >= 25,
                     "Preparation requires Windows x64 and Java 25 or newer");
             ParentPipe.watch(System.in);
+            Path progress = startInstallProgress(args[1], install);
             Properties settings = readPackOptions(Paths.get(args[1]));
             DownloadOptions options = DownloadOptions.read(settings, Paths.get("").toAbsolutePath());
             InstallerMetadata.Artifact release = RELEASE;
@@ -54,20 +54,35 @@ public final class PrepareMain {
                     release = customRelease(cache, options::download, version);
                 }
             }
-            prepare(args, options::download, release, options);
+            prepare(args, options::download, release, options, progress);
         } catch (IOException | RuntimeException ex) {
             System.err.println("Outlands preparation failed: " + ex.getMessage());
             System.exit(ex instanceof InvalidLocalPack ? PackSettings.INVALID_LOCAL_PACK_EXIT : 1);
         }
     }
 
-    static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release)
-            throws IOException {
-        prepare(args, downloader, release, DownloadOptions.DEFAULT);
+    private static boolean installMode(String[] args) throws IOException {
+        boolean install = args.length == 5 && "--install".equals(args[4]);
+        require(args.length == 4 || install,
+                "Expected cacheDir, runDir, local MMC pack / installer (or empty), bootstrapJar [--install]");
+        return install;
     }
 
-    static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release,
-                        DownloadOptions options) throws IOException {
+    private static Path startInstallProgress(String runDir, boolean install) throws IOException {
+        if (!install) return null;
+        Path progress = Paths.get(runDir).toRealPath().resolve("install-progress");
+        writeProgress(progress, "verify", 0, 0);
+        return progress;
+    }
+
+    static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release)
+            throws IOException {
+        boolean install = installMode(args);
+        prepare(args, downloader, release, DownloadOptions.DEFAULT, startInstallProgress(args[1], install));
+    }
+
+    private static void prepare(String[] args, VerifiedCache.Downloader downloader, InstallerMetadata.Artifact release,
+                                DownloadOptions options, Path progress) throws IOException {
         Path runDir = Paths.get(args[1]).toRealPath();
         require(Files.isDirectory(runDir), "Run directory must already exist");
         Path argFile = runDir.resolve("java.args");
@@ -94,14 +109,20 @@ public final class PrepareMain {
                         "Outlands release does not match the requested MMC package version");
             }
             System.out.println("Preparing Outlands " + metadata.id);
+            int done = 0;
+            int total = metadata.classpath.size() + metadata.natives.size();
+            writeProgress(progress, "dependencies", done, total);
             for (InstallerMetadata.Artifact artifact : metadata.classpath) {
                 VerifiedCache.Source embedded = artifact.embeddedPath == null
                         ? null : () -> zip.getInputStream(zip.getEntry(artifact.embeddedPath));
                 classpath.add(classpathEntry(cache.obtain(artifact, embedded)));
+                writeProgress(progress, "dependencies", ++done, total);
             }
             NativeExtractor extractor = new NativeExtractor(natives);
             for (InstallerMetadata.Artifact artifact : metadata.natives) {
-                extractor.extract(cache.obtain(artifact, null), artifact.excludes);
+                Path archive = cache.obtain(artifact, null);
+                writeProgress(progress, "dependencies", ++done, total);
+                extractor.extract(archive, artifact.excludes);
             }
         } catch (IOException problem) {
             if (readingLocalMetadata) throw new InvalidLocalPack(problem);
@@ -124,6 +145,7 @@ public final class PrepareMain {
             properties.setProperty("game." + i, metadata.game.get(i));
         }
         writeAtomically(propertiesFile, output -> properties.store(output, null));
+        writeProgress(progress, "save", 0, 0);
         System.out.println("Outlands preparation complete");
     }
 
@@ -213,6 +235,12 @@ public final class PrepareMain {
         String value = path.toString();
         require(value.indexOf(';') < 0, "Windows classpath cannot use paths containing semicolons");
         return value;
+    }
+
+    private static void writeProgress(Path target, String phase, int done, int total) throws IOException {
+        if (target == null) return;
+        byte[] record = (phase + " " + done + " " + total + "\n").getBytes(StandardCharsets.UTF_8);
+        writeAtomically(target, output -> output.write(record));
     }
 
     private interface OutputWriter {
